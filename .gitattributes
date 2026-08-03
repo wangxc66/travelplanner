@@ -1,0 +1,17 @@
+# Normalise line endings so the repo is identical on Windows, macOS and Linux.
+# Without this, a clone on another OS shows every file as modified.
+* text=auto eol=lf
+
+# gradlew is executed by sh — CRLF there breaks it outright.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Windows-only scripts must keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touch binaries.
+*.jar binary
+*.png binary
+*.jpg binary
+*.ico binary

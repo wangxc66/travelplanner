@@ -1,0 +1,142 @@
+# TripCanvas — backend
+
+Spring Boot service behind the TripCanvas trip planner. Same stack shape as the staybooking / twitch
+projects: Java + Spring Boot + Gradle, JWT auth via Spring Security, Spring Data JPA, Caffeine cache.
+
+## Run
+
+```bash
+./gradlew bootRun
+```
+
+Starts on `http://localhost:8080` against an in-memory H2 database that is created and seeded on every
+boot — no Docker, no local database needed. Seed content is the searchable catalog only: 3 cities and
+84 POIs. Accounts and trips are created through the app.
+
+H2 console: `http://localhost:8080/h2-console` (JDBC URL `jdbc:h2:mem:travelplanner`, user `sa`).
+
+### PostgreSQL instead
+
+```bash
+./gradlew bootRun --args='--spring.profiles.active=postgres'
+```
+
+Expects `travelplanner` on `localhost:5432`. Same JPA mappings, `ddl-auto: update`.
+
+## Tests
+
+```bash
+./gradlew test
+```
+
+`RoutePlannerTest` covers the interesting part: a scrambled line of stops becomes one sweep, an
+evening-only venue is pushed to the end of the day, no stop is scheduled past its closing time,
+optimizing never increases travel time, and a pinned first stop stays first. `PolylineCodecTest` checks
+the encoded-polyline codec against Google's reference example and round-trips leg stitching.
+
+## Design notes
+
+**POIs live in our own database, not the Places API.** The brief asks for database-backed POI search,
+and keeping Places off the critical path also keeps the API bill flat. Google Maps is used for what it
+is uniquely good at: rendering, overlays, routing.
+
+**Routing sits behind one interface.** `RouteProvider` supplies the travel-time matrix the optimizer
+searches over, and the per-leg duration / distance / geometry the timeline and map render.
+
+- `GoogleRoutesProvider` — the real thing, via the Google **Routes API**. Two endpoints:
+  `computeRouteMatrix` for the n×n matrix, and one `computeRoutes` call per ordered day (middle stops
+  passed as `intermediates`) which returns each leg's duration, distance and encoded polyline. That
+  polyline is what makes the map follow actual streets and rail instead of cutting through buildings.
+  Both results are cached in Caffeine on the exact coordinate set + travel mode, so repeatedly hitting
+  Optimize on one day costs nothing after the first call. Transit and traffic depend on *when* you
+  travel, so `departureTime` is the next 09:00 **in the city's own timezone** — otherwise a Tokyo
+  itinerary gets priced against 3 a.m. service levels.
+- `OsrmRouteProvider` — **the keyless default.** Real street geometry and real road distance from an
+  OSRM server, via the same two calls (`/table` for the matrix, one `/route` per day). OSRM returns
+  geometry per navigation *step*, so each itinerary leg is stitched back together by `PolylineCodec`.
+  Driving durations are OSRM's own; walking and transit durations are derived from the real road
+  distance, because the public demo server's pedestrian profile returns car-like times and OSRM has no
+  concept of trains — transit borrows the driving corridor for its shape, which beats a straight line
+  across the bay but is not a rail alignment.
+- `EstimatedRouteProvider` — last resort: great-circle distance with a per-mode detour factor and fixed
+  overhead. No network, no geometry, so the map draws straight lines.
+
+`RouteProviderConfig` picks the best available at startup and logs which. Each tier is also the failure
+fallback for the tier above it — a bad key or an unreachable OSRM degrades route *quality* instead of
+breaking the planner, and Google's per-pair "no route" answers fall back individually so the matrix is
+never sparse.
+
+```bash
+# real geometry AND real durations for every mode
+GOOGLE_MAPS_API_KEY=your-key ./gradlew bootRun
+
+# your own OSRM instead of the public demo server
+OSRM_BASE_URL=http://localhost:5000 ./gradlew bootRun
+```
+
+The Google key needs the **Routes API** enabled on the Cloud project. The matrix is billed per element
+(n² per day), which is exactly why both providers cache on the coordinate set plus travel mode — repeat
+Optimize clicks on one day cost nothing. The public OSRM server is a courtesy demo with no SLA and is
+explicitly not for production; `travelplanner.osrm.enabled: false` turns it off.
+
+**Ordering a day is TSP with time windows.** `RoutePlanner` minimizes, lexicographically, (1) minutes
+spent inside a closed venue and (2) the time the day ends — which counts travel and waiting together.
+Minimizing raw travel alone produces schedules that are geometrically tidy and practically useless: it
+will send you to a bar that opens at 18:00 first thing in the morning. For n ≤ 12 stops it is solved
+exactly with Held-Karp bitmask DP over (visited set, last stop) in O(n²·2ⁿ), where the DP value is the
+earliest achievable departure clock — arriving earlier is never worse, because waiting is always
+allowed. Above 12 it falls back to earliest-completion greedy plus 2-opt scored on the full schedule.
+
+**One read shape.** Every mutating endpoint returns the entire recomputed `TripDto` — days, clock
+timeline, per-leg distance, warnings, suggestions. The client never has to reconcile partial updates,
+which is why drag-and-drop, optimize and rebalance all stay in sync with the map for free.
+
+**No presentation strings cross the wire.** The server knows a stop would run past closing time; it does
+not decide the language or the wording. Every user-facing message is a `NoticeDto` — a semantic code
+plus parameters — and `ApiException` carries the same, alongside an English message the client uses only
+as a fallback for codes it does not recognise:
+
+```json
+{"code": "warning.closesEarly", "params": {"closesAt": "18:00"}}
+{"message": "That place is not in Tokyo", "code": "error.poiWrongCity", "params": {"city": "Tokyo"}}
+```
+
+The same principle removed three other leaks: the weekday name (the client formats it from the ISO
+date), the "Open anytime" label (now an `alwaysOpen` boolean), and duration formatting. The payoff is
+that the whole product switches language instantly with no redeploy, and all copy lives in one place.
+
+## API
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/auth/register`, `/auth/login` | returns a JWT |
+| GET | `/api/cities` | public |
+| GET | `/api/cities/{id}/pois?keyword=&category=&limit=` | public, cached |
+| GET | `/api/cities/{id}/categories` | public |
+| GET | `/api/trips` | trips of the caller |
+| POST | `/api/trips` | `{cityId, title, startDate, numDays}` (1–15) |
+| GET | `/api/trips/{id}` | full plan with timeline + warnings |
+| PATCH | `/api/trips/{id}` | title / date / numDays / dayStartHour / defaultMode |
+| POST | `/api/trips/{id}/items` | `{poiId, dayIndex}` |
+| DELETE | `/api/trips/{id}/items/{itemId}` | |
+| POST | `/api/trips/{id}/items/{itemId}/move` | `{dayIndex, seq}` — cross-day drag |
+| POST | `/api/trips/{id}/items/{itemId}/lock` | pin a slot against Optimize |
+| PUT | `/api/trips/{id}/days/{day}/order` | `{itemIds}` — drag-and-drop within a day |
+| POST | `/api/trips/{id}/days/{day}/optimize` | reorder one day |
+| POST | `/api/trips/{id}/optimize` | reorder every day |
+| POST | `/api/trips/{id}/rebalance` | move stops off over-full days, then reorder |
+
+## Shape
+
+```
+entity/      City, Poi, Trip, ItineraryItem, UserEntity, TravelMode
+repository/  Spring Data JPA interfaces; POI search is one JPQL query
+security/    JwtService, JwtAuthFilter, SecurityConfig
+service/     AuthService, CatalogService, TripService
+             RoutePlanner            scheduling + TSP with time windows
+             RouteProvider           Google | Osrm | Estimated, chosen at startup
+             PolylineCodec           encoded-polyline encode/decode
+             TravelTimeEstimator     speed model for modes a router cannot time
+web/         controllers + ApiException/GlobalExceptionHandler
+config/      CacheConfig (Caffeine), RouteProviderConfig, DataSeeder
+```

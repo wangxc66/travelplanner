@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: travelplanner
+
+  datasource:
+    url: jdbc:h2:mem:travelplanner;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+    properties:
+      hibernate.format_sql: true
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+server:
+  port: 8080
+
+travelplanner:
+  h2:
+    tcp:
+      # Publishes the in-memory database on a loopback TCP port so IntelliJ / DataGrip / DBeaver can
+      # browse it while the app runs. Development convenience only.
+      enabled: true
+      port: 9092
+  jwt:
+    # Demo secret. Override with TRAVELPLANNER_JWT_SECRET in any real deployment.
+    secret: ${TRAVELPLANNER_JWT_SECRET:travel-planner-demo-secret-key-please-change-me-1234567890}
+    ttl-hours: 72
+  planner:
+    day-start-hour: 9
+    day-end-hour: 21
+  google:
+    # Set this (or GOOGLE_MAPS_API_KEY) to get real routes and durations from the Routes API for
+    # every travel mode. When empty, routing falls back to OSRM below.
+    api-key: ${GOOGLE_MAPS_API_KEY:}
+    routes-base-url: https://routes.googleapis.com
+  osrm:
+    # Keyless real street routing, used when no Google key is set. The public demo server is a
+    # courtesy service with no SLA — point this at your own OSRM for anything beyond development.
+    enabled: true
+    base-url: ${OSRM_BASE_URL:https://router.project-osrm.org}
+
+logging:
+  level:
+    org.hibernate.SQL: warn
+
+---
+# Production-shaped profile: PostgreSQL, same JPA code path.
+spring:
+  config:
+    activate:
+      on-profile: postgres
+  datasource:
+    url: jdbc:postgresql://localhost:5432/travelplanner
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
