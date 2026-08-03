@@ -1,7 +1,17 @@
 # TripCanvas — backend
 
+Plan a city trip day by day: search a POI catalog, drop stops on a map, and let the planner work out
+the order that actually fits in a day. This repository is the service; the UI lives in
+**[travelplanner-frontend](https://github.com/wangxc66/travelplanner-frontend)**.
+
 Spring Boot service behind the TripCanvas trip planner. Same stack shape as the staybooking / twitch
 projects: Java + Spring Boot + Gradle, JWT auth via Spring Security, Spring Data JPA, Caffeine cache.
+
+The one interesting problem here is [ordering a day](#design-notes): it is an open-path Travelling
+Salesman Problem *with time windows*, solved exactly with Held-Karp bitmask DP for the sizes a human
+actually plans. Start with [`RoutePlanner`](src/main/java/com/laioffer/travelplanner/service/RoutePlanner.java).
+
+Running it start to finish, in Chinese: [USAGE.md](USAGE.md).
 
 ## Run
 
@@ -33,6 +43,8 @@ Expects `travelplanner` on `localhost:5432`. Same JPA mappings, `ddl-auto: updat
 evening-only venue is pushed to the end of the day, no stop is scheduled past its closing time,
 optimizing never increases travel time, and a pinned first stop stays first. `PolylineCodecTest` checks
 the encoded-polyline codec against Google's reference example and round-trips leg stitching.
+
+<a id="design-notes"></a>
 
 ## Design notes
 
