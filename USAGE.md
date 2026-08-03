@@ -2,10 +2,10 @@
 
 一个城市旅行路线规划器。搜索景点 → 拖到某一天 → 让规划器算出真正排得进一天的顺序。
 
-前后端两个目录：
+前后端是两个独立的仓库：
 
-- `LMS/travelplanner` —— 后端（Java / Spring Boot / Gradle）
-- `LMS/travelplannerfe` —— 前端（React / CRA / antd）
+- [travelplanner](https://github.com/wangxc66/travelplanner) —— 后端（Java / Spring Boot / Gradle），也就是本仓库
+- [travelplanner-frontend](https://github.com/wangxc66/travelplanner-frontend) —— 前端（React / CRA / antd）
 
 ---
 
@@ -21,34 +21,63 @@
 {"code":"warning.closesEarly","params":{"closesAt":"18:00"}}
 ```
 
-文案全部在 `travelplannerfe/src/i18n/en.js` 和 `zh.js` 里（各 115 个键，一一对应）。改文案不需要重启后端。
+文案全部在前端仓库的 `src/i18n/en.js` 和 `zh.js` 里（各 115 个键，一一对应）。改文案不需要重启后端。
 
 **没有翻译的部分**：景点名称和描述是数据库里的数据（`Ghibli Museum`、城市名 `Tokyo`），不是界面文案。要中文景点名需要给 `poi` 表加 `name_zh` / `description_zh` 列并按语言返回。
 
-## 1. 启动
+## 1. 第一次：把两个仓库拉下来
 
-开两个终端。**后端先起**（前端要连它）。
-
-终端 1：
+前后端是两个仓库。先 `cd` 到你想放代码的地方（比如 `cd ~/projects`），**在同一个父目录下**克隆两个：
 
 ```bash
-cd C:/Users/19569/Desktop/LMS/travelplanner && ./gradlew bootRun
+git clone https://github.com/wangxc66/travelplanner.git
+```
+
+```bash
+git clone https://github.com/wangxc66/travelplanner-frontend.git
+```
+
+`git clone` 会在**你当前所在的目录**下建一个和仓库同名的文件夹。不确定当前在哪就先敲 `pwd`（PowerShell 里是 `Get-Location`）。想指定位置就在后面加路径：
+
+```bash
+git clone https://github.com/wangxc66/travelplanner.git D:/code/travelplanner
+```
+
+前端依赖没有进仓库（600MB），先装一次：
+
+```bash
+cd travelplanner-frontend && npm install
+```
+
+后端不用装 —— Gradle wrapper 第一次运行会自己下载依赖。
+
+## 2. 启动
+
+开两个终端，各自 `cd` 进对应的目录。**后端先起**（前端要连它）。
+
+终端 1，在 `travelplanner/` 里：
+
+```bash
+./gradlew bootRun
 ```
 
 看到 `Started TravelPlannerApplication in X seconds` 就是好了。
 
-终端 2：
+终端 2，在 `travelplanner-frontend/` 里：
 
 ```bash
-cd C:/Users/19569/Desktop/LMS/travelplannerfe && npm start
+npm start
 ```
 
 看到 `Compiled successfully!`，浏览器会自动打开 http://localhost:3000。首次 webpack 编译要 20 秒左右。
 
 > PowerShell 里后端那条命令是 `.\gradlew.bat bootRun`。
+> macOS / Linux 上如果报 `Permission denied`，执行 `chmod +x gradlew`。
 > IntelliJ 里直接点 `TravelPlannerApplication.main()` 旁边的绿色 ▶ 更方便（重启快、能断点、红色 ■ 能干净地停掉）。
 
-## 2. 结束
+两个文件夹放哪、叫什么名字都无所谓 —— 前端通过 `http://localhost:8080` 找后端，不依赖目录结构。
+
+## 3. 结束
 
 每个终端里 `Ctrl+C`。后端偶尔会留下 java 进程不放端口，报 `Port 8080 was already in use` 时：
 
@@ -56,7 +85,7 @@ cd C:/Users/19569/Desktop/LMS/travelplannerfe && npm start
 powershell -Command "Get-NetTCPConnection -LocalPort 8080 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"
 ```
 
-## 3. 数据会在重启后清空
+## 4. 数据会在重启后清空
 
 数据库是 **H2 内存库**，后端进程一停，你注册的账号和建的行程全部消失，下次启动重新只播种 POI 目录（3 个城市 84 个景点）。
 
@@ -106,7 +135,7 @@ select day_index, seq, poi_id from itinerary_item where trip_id = 1 order by day
 
 ---
 
-## 4. 第一次用，按这个顺序走
+## 5. 第一次用，按这个顺序走
 
 ### ① 注册
 
@@ -178,14 +207,14 @@ select day_index, seq, poi_id from itinerary_item where trip_id = 1 order by day
 
 ---
 
-## 5. 地图和真实路线
+## 6. 地图和真实路线
 
 地图右上角的 badge 会明确告诉你当前是什么状态，例如 `Open basemap · real routes`。两件事是**独立**的：
 
 **底图** —— 配了浏览器 key 用 Google Maps，没配用 OpenStreetMap。两者的覆盖层完全一样（编号水滴 pin、橙色路线、分类着色的候选点）。
 
 ```bash
-cd travelplannerfe
+# 在前端仓库里
 cp .env.example .env      # 然后填 REACT_APP_GOOGLE_MAPS_API_KEY=...，重启 npm start
 ```
 
@@ -200,33 +229,34 @@ cp .env.example .env      # 然后填 REACT_APP_GOOGLE_MAPS_API_KEY=...，重启
 想用 Google（Cloud 项目里要启用 **Routes API**，注意矩阵按元素计费）：
 
 ```bash
-cd travelplanner && GOOGLE_MAPS_API_KEY=你的key ./gradlew bootRun
+# 在后端仓库里
+GOOGLE_MAPS_API_KEY=你的key ./gradlew bootRun
 ```
 
 要知道的两点：默认这档的公交路线画的是**驾车路网的形状**（OSRM 完全不知道轨道交通的存在）；`router.project-osrm.org` 是公益 demo 服务器，没有 SLA、不能用于生产，正经用要自己起一个（`OSRM_BASE_URL=http://localhost:5000`）。
 
 ---
 
-## 6. 跑测试
+## 7. 跑测试
 
 ```bash
-cd C:/Users/19569/Desktop/LMS/travelplanner && ./gradlew test
+./gradlew test
 ```
 
 9 个测试。`RoutePlannerTest` 覆盖规划器最关键的行为（乱序共线点变单向扫描、夜场推到最后、不排到闭馆之后、优化后通行时间不增、钉住的首站不动），`PolylineCodecTest` 用 Google 官方规范的参考样例验证折线编解码。
 
 ---
 
-## 7. 出问题先看这里
+## 8. 出问题先看这里
 
 | 现象 | 原因 / 处理 |
 |---|---|
 | 页面提示 `session expired`，退回登录页 | 后端重启了，内存库里的账号没了。重新注册一个 |
 | 登录后一直转圈 / 请求 401 | 后端没起来或还没起完。等 `Started TravelPlannerApplication` |
-| `Port 8080 was already in use` | 上一个后端进程没退，用第 2 节那条命令杀掉 |
+| `Port 8080 was already in use` | 上一个后端进程没退，用第 3 节那条命令杀掉 |
 | 地图空白 | 网络到 OSM 瓦片服务不通；换 Google key 或检查网络 |
-| 路线是直线 | 后端启动日志看第 5 节那张表是哪一档；OSRM 不可达会降级，会打 WARN 日志 |
+| 路线是直线 | 后端启动日志看第 6 节那张表是哪一档；OSRM 不可达会降级，会打 WARN 日志 |
 | 搜不到任何景点 | 确认后端 `GET /api/cities` 返回 3 个城市且 poiCount 不是 0 |
 | 加景点报 `That place is not in X` | 那个景点属于别的城市。一个行程只能规划一个城市（MVP 范围） |
 
-更细的架构和 API 说明见 `travelplanner/README.md` 和 `travelplannerfe/README.md`。
+更细的架构和 API 说明见两个仓库各自的 `README.md`。
