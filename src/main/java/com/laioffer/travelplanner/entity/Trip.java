@@ -45,6 +45,11 @@ public class Trip {
     @Enumerated(EnumType.STRING)
     private TravelMode defaultMode;
 
+    /**
+     * Never read directly — the service loads items through {@code ItineraryItemRepository}. The
+     * mapping exists so that deleting a trip cascades to its stops instead of failing on the foreign
+     * key.
+     */
     @OneToMany(mappedBy = "trip", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     private List<ItineraryItem> items = new ArrayList<>();
 
@@ -112,9 +117,5 @@ public class Trip {
 
     public void setDefaultMode(TravelMode defaultMode) {
         this.defaultMode = defaultMode;
-    }
-
-    public List<ItineraryItem> getItems() {
-        return items;
     }
 }

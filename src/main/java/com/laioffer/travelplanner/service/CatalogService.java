@@ -33,14 +33,6 @@ public class CatalogService {
                 .toList();
     }
 
-    @Transactional(readOnly = true)
-    public CityDto city(Long cityId) {
-        return cities().stream()
-                .filter(c -> c.id().equals(cityId))
-                .findFirst()
-                .orElseThrow(() -> ApiException.notFound("error.cityNotFound", "City not found"));
-    }
-
     @Cacheable(value = CacheConfig.POI_SEARCH, key = "#cityId + '|' + #keyword + '|' + #category + '|' + #limit")
     @Transactional(readOnly = true)
     public List<PoiDto> searchPois(Long cityId, String keyword, String category, int limit) {

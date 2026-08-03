@@ -21,7 +21,7 @@
 {"code":"warning.closesEarly","params":{"closesAt":"18:00"}}
 ```
 
-文案全部在前端仓库的 `src/i18n/en.js` 和 `zh.js` 里（各 115 个键，一一对应）。改文案不需要重启后端。
+文案全部在前端仓库的 `src/i18n/en.js` 和 `zh.js` 里，两份键一一对应。改文案不需要重启后端。
 
 **没有翻译的部分**：景点名称和描述是数据库里的数据（`Ghibli Museum`、城市名 `Tokyo`），不是界面文案。要中文景点名需要给 `poi` 表加 `name_zh` / `description_zh` 列并按语言返回。
 

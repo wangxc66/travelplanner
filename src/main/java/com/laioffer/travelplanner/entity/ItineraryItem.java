@@ -35,8 +35,6 @@ public class ItineraryItem {
     /** Pinned items keep their position when the day is auto-optimized. */
     private boolean locked;
 
-    private String note;
-
     protected ItineraryItem() {
     }
 
@@ -81,13 +79,5 @@ public class ItineraryItem {
 
     public void setLocked(boolean locked) {
         this.locked = locked;
-    }
-
-    public String getNote() {
-        return note;
-    }
-
-    public void setNote(String note) {
-        this.note = note;
     }
 }
