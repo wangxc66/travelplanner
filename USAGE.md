@@ -254,6 +254,7 @@ GOOGLE_MAPS_API_KEY=你的key ./gradlew bootRun
 | 页面提示 `session expired`，退回登录页 | 后端重启了，内存库里的账号没了。重新注册一个 |
 | 登录后一直转圈 / 请求 401 | 后端没起来或还没起完。等 `Started TravelPlannerApplication` |
 | `Port 8080 was already in use` | 上一个后端进程没退，用第 3 节那条命令杀掉 |
+| `npm start` 报 `options.allowedHosts[0] should be a non-empty string` | 换到了非私网段的网络（运营商 NAT 100.64.x、VPN、校园网、酒店网）。CRA 只认 10.x / 172.16–31.x / 192.168.x 三个私网段，其余一律丢弃导致 `allowedHosts: [undefined]`。前端仓库的 `.env.development` 已经修好，**确认那个文件存在**即可 |
 | 地图空白 | 网络到 OSM 瓦片服务不通；换 Google key 或检查网络 |
 | 路线是直线 | 后端启动日志看第 6 节那张表是哪一档；OSRM 不可达会降级，会打 WARN 日志 |
 | 搜不到任何景点 | 确认后端 `GET /api/cities` 返回 3 个城市且 poiCount 不是 0 |
