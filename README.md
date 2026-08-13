@@ -12,6 +12,7 @@ Salesman Problem *with time windows*, solved exactly with Held-Karp bitmask DP f
 actually plans. Start with [`RoutePlanner`](src/main/java/com/laioffer/travelplanner/service/RoutePlanner.java).
 
 Running it start to finish, in Chinese: [USAGE.md](USAGE.md).
+Working on it with us: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Run
 
