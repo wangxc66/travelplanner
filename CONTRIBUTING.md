@@ -1,7 +1,7 @@
 # 参与开发
 
 后端仓库。前端在 [travelplanner-frontend](https://github.com/wangxc66/travelplanner-frontend)，
-两边的流程是一样的。
+两边的流程是一样。
 
 ## 第一次上手
 
