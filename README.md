@@ -4,7 +4,7 @@ Plan a city trip day by day: search a POI catalog, drop stops on a map, and let 
 the order that actually fits in a day. This repository is the service; the UI lives in
 **[travelplanner-frontend](https://github.com/wangxc66/travelplanner-frontend)**.
 
-Spring Boot service behind the TripCanvas trip planner. Same stack shape as the staybooking / twitch
+Spring Boot behind the TripCanvas trip planner. Same stack shape as the staybooking / twitch
 projects: Java + Spring Boot + Gradle, JWT auth via Spring Security, Spring Data JPA, Caffeine cache.
 
 The one interesting problem here is [ordering a day](#design-notes): it is an open-path Travelling
