@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Locale;
 
 @Service
 public class CatalogService {
@@ -36,7 +37,7 @@ public class CatalogService {
     @Cacheable(value = CacheConfig.POI_SEARCH, key = "#cityId + '|' + #keyword + '|' + #category + '|' + #limit")
     @Transactional(readOnly = true)
     public List<PoiDto> searchPois(Long cityId, String keyword, String category, int limit) {
-        String k = keyword == null ? "" : keyword.trim().toLowerCase();
+        String k = keyword == null ? "" : escapeLike(keyword.trim().toLowerCase(Locale.ROOT));
         String c = category == null || category.isBlank() || "All".equalsIgnoreCase(category) ? "" : category;
         return poiRepository.search(cityId, k, c).stream()
                 .limit(limit)
@@ -47,6 +48,18 @@ public class CatalogService {
     @Transactional(readOnly = true)
     public List<String> categories(Long cityId) {
         return poiRepository.findCategories(cityId);
+    }
+
+    /**
+     * Makes {@code %}, {@code _} and {@code \} literal inside a LIKE pattern.
+     *
+     * <p>Without this a traveler searching for {@code %} gets back the entire city, because the
+     * character they typed is the SQL wildcard. Paired with the {@code escape} clause in
+     * {@link com.laioffer.travelplanner.repository.PoiRepository#search}, a keyword now only ever
+     * means the text the traveler typed.
+     */
+    private static String escapeLike(String keyword) {
+        return keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     public static PoiDto toDto(Poi poi) {
