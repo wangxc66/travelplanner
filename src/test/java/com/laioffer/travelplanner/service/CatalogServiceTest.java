@@ -72,6 +72,13 @@ class CatalogServiceTest {
         assertThat(keywordFor("   ")).isEmpty();
     }
 
+    @Test
+    @DisplayName("LIKE wildcards in a keyword are escaped into literals")
+    void escapesLikeWildcards() {
+        assertThat(keywordFor("50%")).isEqualTo("50\\%");
+        assertThat(keywordFor("sushi_bar")).isEqualTo("sushi\\_bar");
+        assertThat(keywordFor("back\\slash")).isEqualTo("back\\\\slash");
+    }
 
     @Test
     @DisplayName("a null, blank or \"All\" category becomes the no-filter sentinel")

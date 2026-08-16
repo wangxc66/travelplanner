@@ -70,7 +70,17 @@ class PoiRepositoryTest {
 
 
 
+    @Test
+    @DisplayName("a percent sign is text, not a wildcard")
+    void treatsPercentAsLiteral() {
+        assertThat(names(search("\\%", ""))).containsExactly("50% Off Outlet");
+    }
 
+    @Test
+    @DisplayName("an underscore is text, not a single-character wildcard")
+    void treatsUnderscoreAsLiteral() {
+        assertThat(names(search("\\_", ""))).containsExactly("Sushi_Bar Nine");
+    }
 
     @Test
     @DisplayName("keywords match the description, not only the name and category")
