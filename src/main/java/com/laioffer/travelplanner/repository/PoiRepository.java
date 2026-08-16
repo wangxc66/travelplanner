@@ -29,7 +29,7 @@ public interface PoiRepository extends JpaRepository<Poi, Long> {
                                  or lower(p.category) like concat('%', :keyword, '%') escape '\\'
                                  or lower(p.description) like concat('%', :keyword, '%') escape '\\')
               and (:category = '' or lower(p.category) = lower(:category))
-            order by p.rating desc, p.name asc
+            order by p.rating desc, p.name asc, p.id asc
             """)
     List<Poi> search(@Param("cityId") Long cityId,
                      @Param("keyword") String keyword,

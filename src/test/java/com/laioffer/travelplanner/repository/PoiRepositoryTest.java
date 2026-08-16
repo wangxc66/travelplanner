@@ -68,6 +68,18 @@ class PoiRepositoryTest {
                 "50% Off Outlet");
     }
 
+    @Test
+    @DisplayName("rows tied on rating and name are ordered by id, so the order is total")
+    void breaksTiesById() {
+        List<Poi> tied = search("", "").stream()
+                .filter(p -> p.getName().equals("Alpha Museum"))
+                .toList();
+
+        assertThat(tied).hasSize(2);
+        assertThat(tied.get(0).getId()).isLessThan(tied.get(1).getId());
+        // Same query, same answer — the property the frontend's pagination depends on.
+        assertThat(names(search("", ""))).isEqualTo(names(search("", "")));
+    }
 
     @Test
     @DisplayName("category matching ignores case")
