@@ -69,6 +69,15 @@ class PoiRepositoryTest {
     }
 
 
+    @Test
+    @DisplayName("category matching ignores case")
+    void matchesCategoryCaseInsensitively() {
+        List<String> canonical = names(search("", "Food"));
+
+        assertThat(canonical).containsExactly("Gamma Cafe", "Sushi_Bar Nine", "Morning Market");
+        assertThat(names(search("", "food"))).isEqualTo(canonical);
+        assertThat(names(search("", "FOOD"))).isEqualTo(canonical);
+    }
 
     @Test
     @DisplayName("a percent sign is text, not a wildcard")
