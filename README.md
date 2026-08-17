@@ -40,10 +40,11 @@ Expects `travelplanner` on `localhost:5432`. Same JPA mappings, `ddl-auto: updat
 ./gradlew test
 ```
 
-`RoutePlannerTest` covers the interesting part: a scrambled line of stops becomes one sweep, an
-evening-only venue is pushed to the end of the day, no stop is scheduled past its closing time,
-optimizing never increases travel time, and a pinned first stop stays first. `PolylineCodecTest` checks
-the encoded-polyline codec against Google's reference example and round-trips leg stitching.
+`RoutePlannerTest` covers the basic scheduling behavior. `RoutePlannerExactTest` adds fixed-matrix
+brute-force, Pareto-window, deterministic tie, two-stop, lock, and 12/13 boundary fixtures;
+`TripServiceOptimizeDayTest` verifies lock-aware persistence integration. `RoutePlannerSloTest` checks
+the 12-stop exact solver against the fixed-matrix `P95 <= 500 ms` target. `PolylineCodecTest` checks the
+encoded-polyline codec against Google's reference example and round-trips leg stitching.
 
 <a id="design-notes"></a>
 
@@ -95,10 +96,12 @@ explicitly not for production; `travelplanner.osrm.enabled: false` turns it off.
 **Ordering a day is TSP with time windows.** `RoutePlanner` minimizes, lexicographically, (1) minutes
 spent inside a closed venue and (2) the time the day ends — which counts travel and waiting together.
 Minimizing raw travel alone produces schedules that are geometrically tidy and practically useless: it
-will send you to a bar that opens at 18:00 first thing in the morning. For n ≤ 12 stops it is solved
-exactly with Held-Karp bitmask DP over (visited set, last stop) in O(n²·2ⁿ), where the DP value is the
-earliest achievable departure clock — arriving earlier is never worse, because waiting is always
-allowed. Above 12 it falls back to earliest-completion greedy plus 2-opt scored on the full schedule.
+will send you to a bar that opens at 18:00 first thing in the morning. For at most 12 movable stops it
+uses multi-label Held-Karp: every `(visited set, last stop)` retains the non-dominated `(closed minutes,
+finish time)` labels needed for an exact soft-window result. Locked stops remain in the full route and
+are forced into their original slots. If a state has at most `P` labels, storage is `O(n·2ⁿ·P)` and the
+current list-based dominance checks are `O(n²·2ⁿ·P²)` in the worst case. Above 12 movable stops it
+falls back to deterministic earliest-completion greedy plus 2-opt scored on the full schedule.
 
 **One read shape.** Every mutating endpoint returns the entire recomputed `TripDto` — days, clock
 timeline, per-leg distance, warnings, suggestions. The client never has to reconcile partial updates,
