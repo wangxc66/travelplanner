@@ -221,9 +221,8 @@ public class TripService {
     // ------------------------------------------------------------------ the smart bits
 
     /**
-     * Re-orders one day so total travel time is minimal, then persists it. Items the traveler pinned
-     * keep their slot: only the unpinned ones are permuted, which is what "lock my hotel first, then
-     * do whatever is fastest" means in practice.
+     * Re-orders one day against the full route and persists it. Locked items remain in their original
+     * slots but still contribute their incoming/outgoing travel, visit duration and opening window.
      */
     @Transactional
     public TripDto optimizeDay(UserEntity user, Long tripId, int dayIndex, String modeOverride) {
@@ -231,42 +230,24 @@ public class TripService {
         int day = requireDay(trip, dayIndex);
         TravelMode mode = resolveMode(trip, modeOverride);
         List<ItineraryItem> items = itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(tripId, day);
-        if (items.size() < 3) {
+        if (items.size() < 2) {
             return detail(trip);
         }
 
-        List<Integer> lockedPositions = new ArrayList<>();
-        List<ItineraryItem> movable = new ArrayList<>();
-        for (int i = 0; i < items.size(); i++) {
-            if (items.get(i).isLocked()) {
-                lockedPositions.add(i);
-            } else {
-                movable.add(items.get(i));
-            }
-        }
-        if (movable.size() < 3) {
+        long movableCount = items.stream().filter(item -> !item.isLocked()).count();
+        if (movableCount <= 1) {
             return detail(trip);
         }
 
-        List<Poi> pois = movable.stream().map(ItineraryItem::getPoi).toList();
-        boolean lockFirst = !lockedPositions.isEmpty() && lockedPositions.getFirst() == 0;
-        List<Integer> order = routePlanner.optimizeOrder(pois, mode, trip.getDayStartHour(), lockFirst);
+        List<Poi> pois = items.stream().map(ItineraryItem::getPoi).toList();
+        List<Boolean> locked = items.stream().map(ItineraryItem::isLocked).toList();
+        List<Integer> order = routePlanner.optimizeOrder(pois, mode, trip.getDayStartHour(), locked);
 
-        List<ItineraryItem> reordered = order.stream().map(movable::get).toList();
-        ItineraryItem[] slots = new ItineraryItem[items.size()];
-        for (int position : lockedPositions) {
-            slots[position] = items.get(position);
+        List<ItineraryItem> reordered = order.stream().map(items::get).toList();
+        for (int i = 0; i < reordered.size(); i++) {
+            reordered.get(i).setSeq(i);
         }
-        int cursor = 0;
-        for (int i = 0; i < slots.length; i++) {
-            if (slots[i] == null) {
-                slots[i] = reordered.get(cursor++);
-            }
-        }
-        for (int i = 0; i < slots.length; i++) {
-            slots[i].setSeq(i);
-        }
-        itemRepository.saveAll(List.of(slots));
+        itemRepository.saveAll(reordered);
         return detail(trip);
     }
 
