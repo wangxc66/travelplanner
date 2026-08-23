@@ -2,6 +2,8 @@ package com.laioffer.travelplanner.service;
 
 import com.laioffer.travelplanner.entity.Poi;
 import com.laioffer.travelplanner.entity.TravelMode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +16,8 @@ import java.util.List;
  */
 public class EstimatedRouteProvider implements RouteProvider {
 
+    private static final Logger log = LoggerFactory.getLogger(EstimatedRouteProvider.class);
+
     private final TravelTimeEstimator estimator;
 
     public EstimatedRouteProvider(TravelTimeEstimator estimator) {
@@ -22,6 +26,7 @@ public class EstimatedRouteProvider implements RouteProvider {
 
     @Override
     public int[][] matrix(List<Poi> pois, TravelMode mode) {
+        long started = RouteProviderProfiler.start();
         int n = pois.size();
         int[][] cost = new int[n][n];
         for (int i = 0; i < n; i++) {
@@ -31,11 +36,14 @@ public class EstimatedRouteProvider implements RouteProvider {
                 cost[j][i] = minutes;
             }
         }
+        RouteProviderProfiler.record(log, "estimated", "matrix", mode, n, n * n,
+                started, false, false, "success");
         return cost;
     }
 
     @Override
     public List<TravelLeg> legs(List<Poi> ordered, TravelMode mode) {
+        long started = RouteProviderProfiler.start();
         List<TravelLeg> legs = new ArrayList<>(Math.max(0, ordered.size() - 1));
         for (int i = 1; i < ordered.size(); i++) {
             Poi from = ordered.get(i - 1);
@@ -43,6 +51,8 @@ public class EstimatedRouteProvider implements RouteProvider {
             legs.add(new TravelLeg(estimator.minutes(from, to, mode),
                     round1(estimator.routeKm(from, to, mode)), null));
         }
+        RouteProviderProfiler.record(log, "estimated", "legs", mode, ordered.size(), legs.size(),
+                started, false, false, "success");
         return legs;
     }
 

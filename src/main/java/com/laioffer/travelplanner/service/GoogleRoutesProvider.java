@@ -7,8 +7,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.cache.Cache;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.ClientHttpRequestFactory;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -47,7 +50,10 @@ public class GoogleRoutesProvider implements RouteProvider {
     private static final String ROUTES_FIELDS =
             "routes.legs.duration,routes.legs.distanceMeters,routes.legs.polyline.encodedPolyline";
 
-    /** computeRoutes allows far more, but a single day never needs it. */
+    private static final int TRANSIT_MATRIX_BATCH_SIZE = 10; // 10 x 10 = Google's 100-element limit
+    private static final int DEFAULT_MATRIX_BATCH_SIZE = 25; // 25 x 25 = Google's 625-element limit
+
+    /** Keep the existing conservative limit for a single non-transit computeRoutes request. */
     private static final int MAX_INTERMEDIATES = 23;
 
     private final RestClient client;
@@ -58,11 +64,19 @@ public class GoogleRoutesProvider implements RouteProvider {
     public GoogleRoutesProvider(String baseUrl, String apiKey, RouteProvider fallback, Cache cache) {
         this.client = RestClient.builder()
                 .baseUrl(baseUrl)
+                .requestFactory(timeouts())
                 .defaultHeader("X-Goog-Api-Key", apiKey)
                 .defaultHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
                 .build();
         this.fallback = fallback;
         this.cache = cache;
+    }
+
+    private static ClientHttpRequestFactory timeouts() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofSeconds(5));
+        factory.setReadTimeout(Duration.ofSeconds(12));
+        return factory;
     }
 
     @Override
@@ -74,31 +88,66 @@ public class GoogleRoutesProvider implements RouteProvider {
 
     @Override
     public int[][] matrix(List<Poi> pois, TravelMode mode) {
+        long started = RouteProviderProfiler.start();
+        int stops = pois.size();
+        int elements = stops * stops;
         if (pois.size() < 2) {
+            RouteProviderProfiler.record(log, "google", "matrix", mode, stops, elements,
+                    started, false, false, "skipped");
             return new int[pois.size()][pois.size()];
         }
         String key = cacheKey("matrix", pois, mode);
         int[][] cached = cache.get(key, int[][].class);
         if (cached != null) {
+            RouteProviderProfiler.record(log, "google", "matrix", mode, stops, elements,
+                    started, true, false, "success");
             return cached;
         }
         int[][] estimated = fallback.matrix(pois, mode);
         try {
-            int[][] real = requestMatrix(pois, mode, estimated);
-            cache.put(key, real);
-            return real;
+            MatrixResult result = requestMatrix(pois, mode, estimated);
+            if (result.complete()) {
+                cache.put(key, result.cost());
+            }
+            RouteProviderProfiler.record(log, "google", "matrix", mode, stops, elements,
+                    started, false, !result.complete(), result.outcome());
+            return result.cost();
         } catch (Exception e) {
             degrade("route matrix", e);
+            RouteProviderProfiler.record(log, "google", "matrix", mode, stops, elements,
+                    started, false, true, "failure");
             return estimated;
         }
     }
 
     /** @param estimated used to fill any pair Google cannot route, so the matrix is never sparse. */
-    private int[][] requestMatrix(List<Poi> pois, TravelMode mode, int[][] estimated) {
-        List<Map<String, Object>> waypoints = pois.stream().map(GoogleRoutesProvider::waypoint).toList();
+    private MatrixResult requestMatrix(List<Poi> pois, TravelMode mode, int[][] estimated) {
+        int[][] cost = copyMatrix(estimated);
+        List<MatrixBlock> blocks = matrixBlocks(pois.size(), matrixBatchSize(mode));
+        int successfulBlocks = 0;
+
+        for (int index = 0; index < blocks.size(); index++) {
+            MatrixBlock block = blocks.get(index);
+            long blockStarted = RouteProviderProfiler.start();
+            try {
+                requestMatrixBlock(pois, mode, cost, block);
+                successfulBlocks++;
+                RouteProviderProfiler.recordBatch(log, "google", mode, pois.size(), index + 1, blocks.size(),
+                        block.sourceCount(), block.destinationCount(), blockStarted, false, "success");
+            } catch (Exception e) {
+                degrade("matrix block " + (index + 1) + "/" + blocks.size(), e);
+                RouteProviderProfiler.recordBatch(log, "google", mode, pois.size(), index + 1, blocks.size(),
+                        block.sourceCount(), block.destinationCount(), blockStarted, true, "failure");
+                // These cells retain their EstimatedRouteProvider values.
+            }
+        }
+        return new MatrixResult(cost, successfulBlocks, blocks.size());
+    }
+
+    private void requestMatrixBlock(List<Poi> pois, TravelMode mode, int[][] cost, MatrixBlock block) {
         Map<String, Object> body = new HashMap<>();
-        body.put("origins", waypoints);
-        body.put("destinations", waypoints);
+        body.put("origins", matrixLocations(pois.subList(block.sourceFrom(), block.sourceTo())));
+        body.put("destinations", matrixLocations(pois.subList(block.destinationFrom(), block.destinationTo())));
         body.put("travelMode", mode.name());
         departureTime(pois).ifPresent(t -> body.put("departureTime", t));
 
@@ -110,56 +159,79 @@ public class GoogleRoutesProvider implements RouteProvider {
                 .body(new ParameterizedTypeReference<>() {
                 });
 
-        int n = pois.size();
-        int[][] cost = new int[n][n];
-        for (int i = 0; i < n; i++) {
-            System.arraycopy(estimated[i], 0, cost[i], 0, n);
-        }
         if (elements == null || elements.isEmpty()) {
             throw new IllegalStateException("computeRouteMatrix returned no elements");
         }
         for (Map<String, Object> element : elements) {
             int from = number(element.get("originIndex"), -1);
             int to = number(element.get("destinationIndex"), -1);
-            if (from < 0 || to < 0 || from >= n || to >= n) {
+            if (from < 0 || to < 0 || from >= block.sourceCount() || to >= block.destinationCount()) {
                 continue;
             }
             String condition = string(element.get("condition"));
             if (condition != null && !condition.isEmpty() && !"ROUTE_EXISTS".equals(condition)) {
                 continue; // keep the estimate for unroutable pairs
             }
-            cost[from][to] = from == to ? 0 : Math.max(1, seconds(element.get("duration")) / 60);
+            int globalFrom = block.sourceFrom() + from;
+            int globalTo = block.destinationFrom() + to;
+            cost[globalFrom][globalTo] = globalFrom == globalTo
+                    ? 0 : Math.max(1, seconds(element.get("duration")) / 60);
         }
-        return cost;
     }
 
     // ------------------------------------------------------------------ legs of one ordered day
 
     @Override
     public List<TravelLeg> legs(List<Poi> ordered, TravelMode mode) {
+        long started = RouteProviderProfiler.start();
+        int stops = ordered.size();
+        int elements = Math.max(0, stops - 1);
         if (ordered.size() < 2) {
+            RouteProviderProfiler.record(log, "google", "legs", mode, stops, elements,
+                    started, false, false, "skipped");
             return List.of();
         }
-        if (ordered.size() - 2 > MAX_INTERMEDIATES) {
-            return fallback.legs(ordered, mode);
+        if (mode != TravelMode.TRANSIT && ordered.size() - 2 > MAX_INTERMEDIATES) {
+            List<TravelLeg> estimated = fallback.legs(ordered, mode);
+            RouteProviderProfiler.record(log, "google", "legs", mode, stops, elements,
+                    started, false, true, "provider_limit");
+            return estimated;
         }
         String key = cacheKey("legs", ordered, mode);
         @SuppressWarnings("unchecked")
         List<TravelLeg> cached = cache.get(key, List.class);
         if (cached != null) {
+            RouteProviderProfiler.record(log, "google", "legs", mode, stops, elements,
+                    started, true, false, "success");
             return cached;
         }
         try {
             List<TravelLeg> real = requestLegs(ordered, mode);
             cache.put(key, real);
+            RouteProviderProfiler.record(log, "google", "legs", mode, stops, elements,
+                    started, false, false, "success");
             return real;
         } catch (Exception e) {
             degrade("route geometry", e);
-            return fallback.legs(ordered, mode);
+            List<TravelLeg> estimated = fallback.legs(ordered, mode);
+            RouteProviderProfiler.record(log, "google", "legs", mode, stops, elements,
+                    started, false, true, "failure");
+            return estimated;
         }
     }
 
     private List<TravelLeg> requestLegs(List<Poi> ordered, TravelMode mode) {
+        if (mode == TravelMode.TRANSIT) {
+            List<TravelLeg> result = new ArrayList<>(ordered.size() - 1);
+            for (int i = 0; i < ordered.size() - 1; i++) {
+                result.addAll(requestSingleRoute(List.of(ordered.get(i), ordered.get(i + 1)), mode));
+            }
+            return result;
+        }
+        return requestSingleRoute(ordered, mode);
+    }
+
+    private List<TravelLeg> requestSingleRoute(List<Poi> ordered, TravelMode mode) {
         Map<String, Object> body = new HashMap<>();
         body.put("origin", waypoint(ordered.getFirst()));
         body.put("destination", waypoint(ordered.getLast()));
@@ -215,6 +287,57 @@ public class GoogleRoutesProvider implements RouteProvider {
     private static Map<String, Object> waypoint(Poi poi) {
         return Map.of("location", Map.of("latLng",
                 Map.of("latitude", poi.getLat(), "longitude", poi.getLng())));
+    }
+
+    static List<Map<String, Object>> matrixLocations(List<Poi> pois) {
+        return pois.stream().map(poi -> Map.<String, Object>of("waypoint", waypoint(poi))).toList();
+    }
+
+    static int matrixBatchSize(TravelMode mode) {
+        return mode == TravelMode.TRANSIT ? TRANSIT_MATRIX_BATCH_SIZE : DEFAULT_MATRIX_BATCH_SIZE;
+    }
+
+    static List<MatrixBlock> matrixBlocks(int stops, int batchSize) {
+        if (stops < 0 || batchSize < 1) {
+            throw new IllegalArgumentException("stops must be non-negative and batchSize positive");
+        }
+        List<MatrixBlock> blocks = new ArrayList<>();
+        for (int sourceFrom = 0; sourceFrom < stops; sourceFrom += batchSize) {
+            int sourceTo = Math.min(stops, sourceFrom + batchSize);
+            for (int destinationFrom = 0; destinationFrom < stops; destinationFrom += batchSize) {
+                int destinationTo = Math.min(stops, destinationFrom + batchSize);
+                blocks.add(new MatrixBlock(sourceFrom, sourceTo, destinationFrom, destinationTo));
+            }
+        }
+        return blocks;
+    }
+
+    private static int[][] copyMatrix(int[][] source) {
+        int[][] copy = new int[source.length][];
+        for (int i = 0; i < source.length; i++) {
+            copy[i] = source[i].clone();
+        }
+        return copy;
+    }
+
+    record MatrixBlock(int sourceFrom, int sourceTo, int destinationFrom, int destinationTo) {
+        int sourceCount() {
+            return sourceTo - sourceFrom;
+        }
+
+        int destinationCount() {
+            return destinationTo - destinationFrom;
+        }
+    }
+
+    private record MatrixResult(int[][] cost, int successfulBlocks, int totalBlocks) {
+        boolean complete() {
+            return successfulBlocks == totalBlocks;
+        }
+
+        String outcome() {
+            return complete() ? "success" : successfulBlocks == 0 ? "failure" : "partial";
+        }
     }
 
     /** Durations are returned as {@code "1234s"}. */

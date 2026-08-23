@@ -47,6 +47,9 @@ travelplanner:
     # courtesy service with no SLA — point this at your own OSRM for anything beyond development.
     enabled: true
     base-url: ${OSRM_BASE_URL:https://router.project-osrm.org}
+    # Each Table API call covers at most this many origins by this many destinations. Failed blocks
+    # retain their offline EstimatedRouteProvider values while successful blocks use real road data.
+    matrix-batch-size: 25
 
 logging:
   level:

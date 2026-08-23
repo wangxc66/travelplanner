@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -117,5 +118,69 @@ class RoutePlannerTest {
 
         List<Integer> order = planner.optimizeOrder(pois, TravelMode.DRIVE, 9, true);
         assertEquals(0, order.getFirst(), "pinned first stop moved");
+    }
+
+    /** Twelve stops are the largest input handled by the exact Held-Karp branch. */
+    @Test
+    void exactBoundaryReturnsEveryOneOfTwelveStopsOnce() {
+        List<Poi> pois = lineOfPois(12);
+
+        List<Integer> order = planner.optimizeOrder(pois, TravelMode.WALK, 9, false);
+
+        assertPermutation(order, 12);
+    }
+
+    /** Thirteen stops cross the boundary and exercise greedy followed by 2-opt. */
+    @Test
+    void largeRouteReturnsEveryOneOfThirteenStopsOnce() {
+        List<Poi> pois = lineOfPois(13);
+
+        List<Integer> order = planner.optimizeOrder(pois, TravelMode.WALK, 9, false);
+
+        assertPermutation(order, 13);
+    }
+
+    /** The large-route heuristic must retain the user's order when it cannot improve its score. */
+    @Test
+    void largeRouteNeverReturnsAWorseScheduleThanTheOriginal() {
+        List<Poi> pois = lineOfPois(13);
+        int before = planner.buildDay(pois, TravelMode.WALK, 9, 24).endMinutes();
+
+        List<Poi> optimized = planner.optimizeOrder(pois, TravelMode.WALK, 9, false).stream()
+                .map(pois::get)
+                .toList();
+        int after = planner.buildDay(optimized, TravelMode.WALK, 9, 24).endMinutes();
+
+        assertTrue(after <= before, "large-route schedule got worse: " + before + " -> " + after);
+    }
+
+    /** The heuristic branch must honor the same pinned-first contract as the exact branch. */
+    @Test
+    void largeRouteKeepsThePinnedFirstStopInPlace() {
+        List<Poi> pois = lineOfPois(13);
+
+        List<Integer> order = planner.optimizeOrder(pois, TravelMode.DRIVE, 9, true);
+
+        assertEquals(0, order.getFirst(), "large-route planner moved the pinned first stop");
+    }
+
+    private List<Poi> lineOfPois(int count) {
+        List<Poi> pois = new ArrayList<>(count);
+        // Insert the line in a deliberately alternating order so optimization has useful work to do.
+        for (int i = 0; i < count; i++) {
+            int coordinateIndex = i % 2 == 0 ? i / 2 : count - 1 - i / 2;
+            pois.add(poi("P" + coordinateIndex,
+                    35.0 + coordinateIndex * 0.002,
+                    139.0 + coordinateIndex * 0.002,
+                    20, 0, 24));
+        }
+        return pois;
+    }
+
+    private static void assertPermutation(List<Integer> order, int expectedSize) {
+        assertEquals(expectedSize, order.size(), "route has the wrong number of stops");
+        assertEquals(expectedSize, new HashSet<>(order).size(), "route contains a duplicate stop");
+        assertTrue(order.stream().allMatch(i -> i >= 0 && i < expectedSize),
+                "route contains an invalid stop index: " + order);
     }
 }

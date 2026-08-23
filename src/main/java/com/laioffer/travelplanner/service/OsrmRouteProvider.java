@@ -44,9 +44,14 @@ public class OsrmRouteProvider implements RouteProvider {
     private final RouteProvider fallback;
     private final TravelTimeEstimator estimator;
     private final Cache cache;
+    private final int matrixBatchSize;
     private final AtomicBoolean warned = new AtomicBoolean(false);
 
-    public OsrmRouteProvider(String baseUrl, RouteProvider fallback, TravelTimeEstimator estimator, Cache cache) {
+    public OsrmRouteProvider(String baseUrl, RouteProvider fallback, TravelTimeEstimator estimator,
+                             Cache cache, int matrixBatchSize) {
+        if (matrixBatchSize < 1) {
+            throw new IllegalArgumentException("matrixBatchSize must be positive");
+        }
         this.client = RestClient.builder()
                 .baseUrl(baseUrl)
                 .requestFactory(timeouts())
@@ -54,6 +59,7 @@ public class OsrmRouteProvider implements RouteProvider {
         this.fallback = fallback;
         this.estimator = estimator;
         this.cache = cache;
+        this.matrixBatchSize = matrixBatchSize;
     }
 
     private static ClientHttpRequestFactory timeouts() {
@@ -72,29 +78,73 @@ public class OsrmRouteProvider implements RouteProvider {
 
     @Override
     public int[][] matrix(List<Poi> pois, TravelMode mode) {
+        long started = RouteProviderProfiler.start();
+        int stops = pois.size();
+        int elements = stops * stops;
         if (pois.size() < 2) {
+            RouteProviderProfiler.record(log, "osrm", "matrix", mode, stops, elements,
+                    started, false, false, "skipped");
             return new int[pois.size()][pois.size()];
         }
         String key = "osrm-matrix|" + mode + '|' + coordinates(pois);
         int[][] cached = cache.get(key, int[][].class);
         if (cached != null) {
+            RouteProviderProfiler.record(log, "osrm", "matrix", mode, stops, elements,
+                    started, true, false, "success");
             return cached;
         }
         int[][] estimated = fallback.matrix(pois, mode);
         try {
-            int[][] real = requestMatrix(pois, mode, estimated);
-            cache.put(key, real);
-            return real;
+            MatrixResult result = requestMatrix(pois, mode, estimated);
+            if (result.complete()) {
+                cache.put(key, result.cost());
+            }
+            RouteProviderProfiler.record(log, "osrm", "matrix", mode, stops, elements,
+                    started, false, !result.complete(), result.outcome());
+            return result.cost();
         } catch (Exception e) {
             degrade("travel matrix", e);
+            RouteProviderProfiler.record(log, "osrm", "matrix", mode, stops, elements,
+                    started, false, true, "failure");
             return estimated;
         }
     }
 
-    private int[][] requestMatrix(List<Poi> pois, TravelMode mode, int[][] estimated) {
+    private MatrixResult requestMatrix(List<Poi> pois, TravelMode mode, int[][] estimated) {
+        int n = pois.size();
+        int[][] cost = copyMatrix(estimated);
+        List<MatrixBlock> blocks = matrixBlocks(n, matrixBatchSize);
+        int successfulBlocks = 0;
+
+        for (int index = 0; index < blocks.size(); index++) {
+            MatrixBlock block = blocks.get(index);
+            long blockStarted = RouteProviderProfiler.start();
+            try {
+                requestMatrixBlock(pois, mode, cost, block);
+                successfulBlocks++;
+                RouteProviderProfiler.recordBatch(log, "osrm", mode, n, index + 1, blocks.size(),
+                        block.sourceCount(), block.destinationCount(), blockStarted, false, "success");
+            } catch (Exception e) {
+                degrade("matrix block " + (index + 1) + "/" + blocks.size(), e);
+                RouteProviderProfiler.recordBatch(log, "osrm", mode, n, index + 1, blocks.size(),
+                        block.sourceCount(), block.destinationCount(), blockStarted, true, "failure");
+                // The corresponding cells retain their EstimatedRouteProvider values.
+            }
+        }
+
+        return new MatrixResult(cost, successfulBlocks, blocks.size());
+    }
+
+    private void requestMatrixBlock(List<Poi> pois, TravelMode mode, int[][] cost, MatrixBlock block) {
+        List<Poi> coordinates = new ArrayList<>(block.sourceCount() + block.destinationCount());
+        coordinates.addAll(pois.subList(block.sourceFrom(), block.sourceTo()));
+        coordinates.addAll(pois.subList(block.destinationFrom(), block.destinationTo()));
+
         Map<String, Object> response = client.get()
-                .uri("/table/v1/{profile}/{coords}?annotations=duration,distance",
-                        profile(mode), coordinates(pois))
+                .uri("/table/v1/{profile}/{coords}?sources={sources}&destinations={destinations}"
+                                + "&annotations=duration,distance",
+                        profile(mode), coordinates(coordinates), indices(0, block.sourceCount()),
+                        indices(block.sourceCount(), coordinates.size()))
                 .retrieve()
                 .body(new ParameterizedTypeReference<>() {
                 });
@@ -102,47 +152,116 @@ public class OsrmRouteProvider implements RouteProvider {
 
         List<List<Number>> durations = rows(response.get("durations"));
         List<List<Number>> distances = rows(response.get("distances"));
-        int n = pois.size();
-        int[][] cost = new int[n][n];
-        for (int i = 0; i < n; i++) {
-            System.arraycopy(estimated[i], 0, cost[i], 0, n);
+        applyBlock(cost, durations, distances, block, mode);
+    }
+
+    void applyBlock(int[][] cost, List<List<Number>> durations, List<List<Number>> distances,
+                    MatrixBlock block, TravelMode mode) {
+        if (durations.size() != block.sourceCount()
+                || durations.stream().anyMatch(row -> row.size() != block.destinationCount())) {
+            throw new IllegalStateException("OSRM returned a " + durations.size() + "-row block, expected "
+                    + block.sourceCount() + "x" + block.destinationCount());
         }
-        for (int i = 0; i < n && i < durations.size(); i++) {
+        for (int i = 0; i < block.sourceCount(); i++) {
             List<Number> row = durations.get(i);
-            for (int j = 0; j < n && j < row.size(); j++) {
-                if (i == j) {
-                    cost[i][j] = 0;
+            for (int j = 0; j < block.destinationCount(); j++) {
+                int globalFrom = block.sourceFrom() + i;
+                int globalTo = block.destinationFrom() + j;
+                if (globalFrom == globalTo) {
+                    cost[globalFrom][globalTo] = 0;
                     continue;
                 }
                 Integer minutes = minutesFor(mode, row.get(j), cell(distances, i, j));
                 if (minutes != null) {
-                    cost[i][j] = Math.max(1, minutes);
+                    cost[globalFrom][globalTo] = Math.max(1, minutes);
                 }
             }
         }
-        return cost;
+    }
+
+    static List<MatrixBlock> matrixBlocks(int stops, int batchSize) {
+        if (stops < 0 || batchSize < 1) {
+            throw new IllegalArgumentException("stops must be non-negative and batchSize positive");
+        }
+        List<MatrixBlock> blocks = new ArrayList<>();
+        for (int sourceFrom = 0; sourceFrom < stops; sourceFrom += batchSize) {
+            int sourceTo = Math.min(stops, sourceFrom + batchSize);
+            for (int destinationFrom = 0; destinationFrom < stops; destinationFrom += batchSize) {
+                int destinationTo = Math.min(stops, destinationFrom + batchSize);
+                blocks.add(new MatrixBlock(sourceFrom, sourceTo, destinationFrom, destinationTo));
+            }
+        }
+        return blocks;
+    }
+
+    private static int[][] copyMatrix(int[][] source) {
+        int[][] copy = new int[source.length][];
+        for (int i = 0; i < source.length; i++) {
+            copy[i] = source[i].clone();
+        }
+        return copy;
+    }
+
+    private static String indices(int fromInclusive, int toExclusive) {
+        StringJoiner joiner = new StringJoiner(";");
+        for (int i = fromInclusive; i < toExclusive; i++) {
+            joiner.add(String.valueOf(i));
+        }
+        return joiner.toString();
+    }
+
+    record MatrixBlock(int sourceFrom, int sourceTo, int destinationFrom, int destinationTo) {
+        int sourceCount() {
+            return sourceTo - sourceFrom;
+        }
+
+        int destinationCount() {
+            return destinationTo - destinationFrom;
+        }
+    }
+
+    private record MatrixResult(int[][] cost, int successfulBlocks, int totalBlocks) {
+        boolean complete() {
+            return successfulBlocks == totalBlocks;
+        }
+
+        String outcome() {
+            return complete() ? "success" : successfulBlocks == 0 ? "failure" : "partial";
+        }
     }
 
     // ------------------------------------------------------------------ legs
 
     @Override
     public List<TravelLeg> legs(List<Poi> ordered, TravelMode mode) {
+        long started = RouteProviderProfiler.start();
+        int stops = ordered.size();
+        int elements = Math.max(0, stops - 1);
         if (ordered.size() < 2) {
+            RouteProviderProfiler.record(log, "osrm", "legs", mode, stops, elements,
+                    started, false, false, "skipped");
             return List.of();
         }
         String key = "osrm-legs|" + mode + '|' + coordinates(ordered);
         @SuppressWarnings("unchecked")
         List<TravelLeg> cached = cache.get(key, List.class);
         if (cached != null) {
+            RouteProviderProfiler.record(log, "osrm", "legs", mode, stops, elements,
+                    started, true, false, "success");
             return cached;
         }
         try {
             List<TravelLeg> real = requestLegs(ordered, mode);
             cache.put(key, real);
+            RouteProviderProfiler.record(log, "osrm", "legs", mode, stops, elements,
+                    started, false, false, "success");
             return real;
         } catch (Exception e) {
             degrade("route geometry", e);
-            return fallback.legs(ordered, mode);
+            List<TravelLeg> estimated = fallback.legs(ordered, mode);
+            RouteProviderProfiler.record(log, "osrm", "legs", mode, stops, elements,
+                    started, false, true, "failure");
+            return estimated;
         }
     }
 
