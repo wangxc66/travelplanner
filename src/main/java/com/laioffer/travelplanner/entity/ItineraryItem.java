@@ -7,6 +7,8 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 
 /**
  * One POI placed on one day of a trip. {@code dayIndex} is 1-based; {@code seq} orders the visits
@@ -14,6 +16,11 @@ import jakarta.persistence.ManyToOne;
  * day" is a single field update.
  */
 @Entity
+@Table(name = "itinerary_item", uniqueConstraints = {
+        @UniqueConstraint(name = "uk_itinerary_item_trip_poi", columnNames = {"trip_id", "poi_id"}),
+        @UniqueConstraint(name = "uk_itinerary_item_trip_day_seq",
+                columnNames = {"trip_id", "day_index", "seq"})
+})
 public class ItineraryItem {
 
     @Id
@@ -21,18 +28,23 @@ public class ItineraryItem {
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "trip_id")
+    @JoinColumn(name = "trip_id", nullable = false,
+            foreignKey = @jakarta.persistence.ForeignKey(name = "fk_itinerary_item_trip"))
     private Trip trip;
 
     @ManyToOne(fetch = FetchType.EAGER, optional = false)
-    @JoinColumn(name = "poi_id")
+    @JoinColumn(name = "poi_id", nullable = false,
+            foreignKey = @jakarta.persistence.ForeignKey(name = "fk_itinerary_item_poi"))
     private Poi poi;
 
+    @jakarta.persistence.Column(nullable = false)
     private int dayIndex;
 
+    @jakarta.persistence.Column(nullable = false)
     private int seq;
 
     /** Pinned items keep their position when the day is auto-optimized. */
+    @jakarta.persistence.Column(nullable = false)
     private boolean locked;
 
     protected ItineraryItem() {

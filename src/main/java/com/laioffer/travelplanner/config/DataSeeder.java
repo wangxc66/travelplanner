@@ -5,8 +5,10 @@ import com.laioffer.travelplanner.entity.Poi;
 import com.laioffer.travelplanner.repository.CityRepository;
 import com.laioffer.travelplanner.repository.PoiRepository;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -20,18 +22,19 @@ import java.util.List;
  * uniquely good at — rendering, overlays and routing.
  */
 @Configuration
+@Profile("demo-seed")
+@ConditionalOnProperty(prefix = "travelplanner.seed", name = "enabled", havingValue = "true")
 public class DataSeeder {
 
     @Bean
     public ApplicationRunner seed(CityRepository cityRepository, PoiRepository poiRepository) {
         return args -> {
-            if (cityRepository.count() > 0) {
-                return;
-            }
-
-            City tokyo = cityRepository.save(new City("Tokyo", "Japan", "Asia/Tokyo", 35.6812, 139.7671, 12, "🗼"));
-            City sf = cityRepository.save(new City("San Francisco", "USA", "America/Los_Angeles", 37.7749, -122.4194, 12, "🌉"));
-            City paris = cityRepository.save(new City("Paris", "France", "Europe/Paris", 48.8566, 2.3522, 12, "🥐"));
+            City tokyo = cityRepository.findByNameAndCountry("Tokyo", "Japan")
+                    .orElseGet(() -> cityRepository.save(new City("Tokyo", "Japan", "Asia/Tokyo", 35.6812, 139.7671, 12, "🗼")));
+            City sf = cityRepository.findByNameAndCountry("San Francisco", "USA")
+                    .orElseGet(() -> cityRepository.save(new City("San Francisco", "USA", "America/Los_Angeles", 37.7749, -122.4194, 12, "🌉")));
+            City paris = cityRepository.findByNameAndCountry("Paris", "France")
+                    .orElseGet(() -> cityRepository.save(new City("Paris", "France", "Europe/Paris", 48.8566, 2.3522, 12, "🥐")));
 
             savePois(poiRepository, tokyo, TOKYO);
             savePois(poiRepository, sf, SAN_FRANCISCO);
@@ -43,11 +46,15 @@ public class DataSeeder {
         List<Poi> pois = new ArrayList<>(rows.length);
         for (String row : rows) {
             String[] f = row.split("\\|");
-            pois.add(new Poi(city, f[0], f[1], Double.parseDouble(f[2]), Double.parseDouble(f[3]),
-                    Double.parseDouble(f[4]), Integer.parseInt(f[5]), Integer.parseInt(f[6]),
-                    Integer.parseInt(f[7]), f[8]));
+            if (!repository.existsByCityIdAndName(city.getId(), f[0])) {
+                pois.add(new Poi(city, f[0], f[1], Double.parseDouble(f[2]), Double.parseDouble(f[3]),
+                        Double.parseDouble(f[4]), Integer.parseInt(f[5]), Integer.parseInt(f[6]),
+                        Integer.parseInt(f[7]), f[8]));
+            }
         }
-        repository.saveAll(pois);
+        if (!pois.isEmpty()) {
+            repository.saveAll(pois);
+        }
     }
 
     // name | category | lat | lng | rating | visitMinutes | openHour | closeHour | description

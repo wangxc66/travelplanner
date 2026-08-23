@@ -49,6 +49,10 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.CONFLICT, code, message, params(keyValues));
     }
 
+    public static ApiException unauthorized(String code, String message) {
+        return new ApiException(HttpStatus.UNAUTHORIZED, code, message);
+    }
+
     /** @param keyValues alternating key, value pairs */
     private static Map<String, String> params(Object... keyValues) {
         Map<String, String> map = new LinkedHashMap<>();
