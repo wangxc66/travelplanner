@@ -1,0 +1,344 @@
+{
+  "info": {
+    "_postman_id": "travelplanner-provider-profiling",
+    "name": "TravelPlanner Provider Profiling",
+    "description": "Creates independent 5, 13, 20, and 25-POI trips, optimizes each, and checks route integrity and no-regression behavior. Run this as a collection; setNextRequest controls the loops.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.variables.set('requestStartedMs', Date.now());"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 Register Test User",
+      "auth": { "type": "noauth" },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const suffix = Date.now().toString();",
+              "pm.collectionVariables.set('testUsername', 'yuanjie_profile_' + suffix);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('User registration succeeds', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.expect(body.token, 'JWT token').to.be.a('string').and.not.empty;",
+              "pm.environment.set('token', body.token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{testUsername}}\",\n  \"password\": \"profile-test-123\",\n  \"displayName\": \"Provider Profile Test\"\n}"
+        },
+        "url": "{{baseUrl}}/auth/register"
+      }
+    },
+    {
+      "name": "02 Get First City",
+      "auth": { "type": "noauth" },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Cities request succeeds', () => pm.response.to.have.status(200));",
+              "const cities = pm.response.json();",
+              "pm.expect(cities.length, 'seeded cities').to.be.above(0);",
+              "pm.collectionVariables.set('cityId', cities[0].id);",
+              "pm.collectionVariables.set('cityName', cities[0].name);"
+            ]
+          }
+        }
+      ],
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/cities" }
+    },
+    {
+      "name": "03 Get 25 POIs",
+      "auth": { "type": "noauth" },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('POI request succeeds', () => pm.response.to.have.status(200));",
+              "const pois = pm.response.json();",
+              "pm.test('Selected city has at least 25 POIs', () => pm.expect(pois.length).to.be.at.least(25));",
+              "pm.collectionVariables.set('poiIds', JSON.stringify(pois.slice(0, 25).map(p => p.id)));",
+              "const requestedSizes = pm.environment.get('scenarioSizes');",
+              "pm.collectionVariables.set('scenarioSizes', requestedSizes || JSON.stringify([5, 13, 20, 25]));",
+              "pm.collectionVariables.set('scenarioIndex', '0');",
+              "pm.collectionVariables.set('profileResults', JSON.stringify([]));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/cities/{{cityId}}/pois?limit=25"
+      }
+    },
+    {
+      "name": "04 Create Scenario Trip",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const sizes = JSON.parse(pm.collectionVariables.get('scenarioSizes'));",
+              "const index = Number(pm.collectionVariables.get('scenarioIndex'));",
+              "pm.collectionVariables.set('scenarioSize', String(sizes[index]));",
+              "pm.collectionVariables.set('addIndex', '0');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Scenario trip is created', () => pm.response.to.have.status(200));",
+              "const trip = pm.response.json();",
+              "pm.collectionVariables.set('tripId', trip.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"cityId\": {{cityId}},\n  \"title\": \"Provider profile - {{scenarioSize}} POIs\",\n  \"startDate\": \"2026-08-20\",\n  \"numDays\": 1\n}"
+        },
+        "url": "{{baseUrl}}/api/trips"
+      }
+    },
+    {
+      "name": "05 Add POI Loop",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const ids = JSON.parse(pm.collectionVariables.get('poiIds'));",
+              "const index = Number(pm.collectionVariables.get('addIndex'));",
+              "pm.collectionVariables.set('currentPoiId', String(ids[index]));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('POI is added', () => pm.response.to.have.status(200));",
+              "const trip = pm.response.json();",
+              "const next = Number(pm.collectionVariables.get('addIndex')) + 1;",
+              "const size = Number(pm.collectionVariables.get('scenarioSize'));",
+              "pm.collectionVariables.set('addIndex', String(next));",
+              "if (next < size) {",
+              "  pm.execution.setNextRequest('05 Add POI Loop');",
+              "} else {",
+              "  pm.execution.setNextRequest('06 Capture Before Optimization');",
+              "}",
+              "pm.expect(trip.plannedCount).to.eql(next);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"poiId\": {{currentPoiId}},\n  \"dayIndex\": 1\n}"
+        },
+        "url": "{{baseUrl}}/api/trips/{{tripId}}/items"
+      }
+    },
+    {
+      "name": "06 Capture Before Optimization",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Trip snapshot succeeds', () => pm.response.to.have.status(200));",
+              "const trip = pm.response.json();",
+              "const day = trip.days[0];",
+              "const size = Number(pm.collectionVariables.get('scenarioSize'));",
+              "pm.expect(day.items.length).to.eql(size);",
+              "pm.collectionVariables.set('beforeItemIds', JSON.stringify(day.items.map(i => i.id)));",
+              "pm.collectionVariables.set('beforeEndMinutes', String(toMinutes(day.endTime)));",
+              "pm.collectionVariables.set('beforeClosingWarnings', String(closingWarnings(day)));",
+              "function closingWarnings(day) {",
+              "  return day.items.flatMap(i => i.warnings || []).filter(w => w.code === 'warning.closesEarly').length;",
+              "}",
+              "function toMinutes(value) {",
+              "  if (!value) return 0;",
+              "  const match = value.match(/(\\d+):(\\d+)/);",
+              "  return Number(match[1]) * 60 + Number(match[2]) + (value.includes('+1d') ? 1440 : 0);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/trips/{{tripId}}" }
+    },
+    {
+      "name": "07 Optimize Scenario",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Optimize succeeds', () => pm.response.to.have.status(200));",
+              "const trip = pm.response.json();",
+              "const day = trip.days[0];",
+              "const size = Number(pm.collectionVariables.get('scenarioSize'));",
+              "const beforeIds = JSON.parse(pm.collectionVariables.get('beforeItemIds'));",
+              "const afterIds = day.items.map(i => i.id);",
+              "pm.test('All POIs remain after optimization', () => {",
+              "  pm.expect(afterIds.length).to.eql(size);",
+              "  pm.expect(new Set(afterIds).size).to.eql(size);",
+              "  pm.expect([...afterIds].sort((a,b) => a-b)).to.eql([...beforeIds].sort((a,b) => a-b));",
+              "});",
+              "const beforeWarnings = Number(pm.collectionVariables.get('beforeClosingWarnings'));",
+              "const afterWarnings = closingWarnings(day);",
+              "pm.test('Closing-warning count does not increase', () => pm.expect(afterWarnings).to.be.at.most(beforeWarnings));",
+              "if (afterWarnings === beforeWarnings) {",
+              "  pm.test('End time does not get later when warning count ties', () => pm.expect(toMinutes(day.endTime)).to.be.at.most(Number(pm.collectionVariables.get('beforeEndMinutes'))));",
+              "}",
+              "pm.collectionVariables.set('optimizedOrder', JSON.stringify(afterIds));",
+              "function closingWarnings(day) {",
+              "  return day.items.flatMap(i => i.warnings || []).filter(w => w.code === 'warning.closesEarly').length;",
+              "}",
+              "function toMinutes(value) {",
+              "  if (!value) return 0;",
+              "  const match = value.match(/(\\d+):(\\d+)/);",
+              "  return Number(match[1]) * 60 + Number(match[2]) + (value.includes('+1d') ? 1440 : 0);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": { "method": "POST", "url": "{{baseUrl}}/api/trips/{{tripId}}/days/1/optimize?mode=TRANSIT" }
+    },
+    {
+      "name": "08 Warm Reordered Cache Key",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Cache warm-up optimize succeeds', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": { "method": "POST", "url": "{{baseUrl}}/api/trips/{{tripId}}/days/1/optimize?mode=TRANSIT" }
+    },
+    {
+      "name": "09 Verify Cached Call and Continue",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Cached optimize succeeds', () => pm.response.to.have.status(200));",
+              "const trip = pm.response.json();",
+              "const day = trip.days[0];",
+              "const size = Number(pm.collectionVariables.get('scenarioSize'));",
+              "pm.expect(day.items.length).to.eql(size);",
+              "const results = JSON.parse(pm.collectionVariables.get('profileResults'));",
+              "results.push({",
+              "  stops: size,",
+              "  matrixElements: size * size,",
+              "  endTime: day.endTime,",
+              "  travelMinutes: day.travelMinutes,",
+              "  closingWarnings: day.items.flatMap(i => i.warnings || []).filter(w => w.code === 'warning.closesEarly').length",
+              "});",
+              "pm.collectionVariables.set('profileResults', JSON.stringify(results));",
+              "const sizes = JSON.parse(pm.collectionVariables.get('scenarioSizes'));",
+              "const nextIndex = Number(pm.collectionVariables.get('scenarioIndex')) + 1;",
+              "pm.collectionVariables.set('scenarioIndex', String(nextIndex));",
+              "if (nextIndex < sizes.length) {",
+              "  pm.execution.setNextRequest('04 Create Scenario Trip');",
+              "} else {",
+              "  pm.execution.setNextRequest('10 Profile Summary');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": { "method": "POST", "url": "{{baseUrl}}/api/trips/{{tripId}}/days/1/optimize?mode=TRANSIT" }
+    },
+    {
+      "name": "10 Profile Summary",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Summary request succeeds', () => pm.response.to.have.status(200));",
+              "const results = JSON.parse(pm.collectionVariables.get('profileResults'));",
+              "const expectedSizes = JSON.parse(pm.collectionVariables.get('scenarioSizes'));",
+              "pm.test('All requested sizes completed', () => pm.expect(results.map(r => r.stops)).to.eql(expectedSizes));",
+              "console.log('TRAVELPLANNER PROFILE RESULTS');",
+              "console.log(JSON.stringify(results, null, 2));",
+              "console.log('Check the Spring Boot terminal for route_provider_call logs and cache_hit=true.');",
+              "pm.execution.setNextRequest(null);"
+            ]
+          }
+        }
+      ],
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/trips/{{tripId}}" }
+    }
+  ],
+  "variable": [
+    { "key": "cityId", "value": "" },
+    { "key": "tripId", "value": "" },
+    { "key": "scenarioSize", "value": "" },
+    { "key": "currentPoiId", "value": "" }
+  ]
+}

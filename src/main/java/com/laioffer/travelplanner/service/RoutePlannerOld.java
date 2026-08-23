@@ -25,14 +25,14 @@ import java.util.List;
  * milliseconds.
  */
 @Service
-public class RoutePlanner {
+public class RoutePlannerOld {
 
     /** Above this many stops per day, exact DP is replaced by the heuristic. */
     private static final int EXACT_LIMIT = 12;
 
     private final RouteProvider routes;
 
-    public RoutePlanner(RouteProvider routes) {
+    public RoutePlannerOld(RouteProvider routes) {
         this.routes = routes;
     }
 
@@ -49,22 +49,9 @@ public class RoutePlanner {
         }
         int[][] cost = routes.matrix(pois, mode);
         int dayStart = dayStartHour * 60;
-        int[] order;
-        if (n <= EXACT_LIMIT) {
-            order = heldKarp(pois, cost, dayStart, lockFirst);
-        } else {
-            int[] original = identityArray(n);
-            int[] optimized = twoOpt(
-                    greedyEarliestFinish(pois, cost, dayStart, lockFirst),
-                    pois, cost, dayStart, lockFirst);
-
-            // A heuristic is allowed to miss the global optimum, but clicking Optimize must never
-            // make the user's existing schedule worse. Keep the original order on ties as well so
-            // we do not surprise the user with a reorder that provides no measurable benefit.
-            order = score(optimized, pois, cost, dayStart) < score(original, pois, cost, dayStart)
-                    ? optimized
-                    : original;
-        }
+        int[] order = n <= EXACT_LIMIT
+                ? heldKarp(pois, cost, dayStart, lockFirst)
+                : twoOpt(greedyEarliestFinish(pois, cost, dayStart, lockFirst), pois, cost, dayStart, lockFirst);
         List<Integer> result = new ArrayList<>(n);
         for (int i : order) {
             result.add(i);
@@ -174,23 +161,17 @@ public class RoutePlanner {
         int n = pois.size();
         boolean[] used = new boolean[n];
         int[] order = new int[n];
-        // step 1: find the start
         int start = 0;
         if (!lockFirst) {
             int bestLeave = Integer.MAX_VALUE;
-            int bestOverrun = Integer.MAX_VALUE;
             for (int i = 0; i < n; i++) {
-                Poi poi = pois.get(i);
-                int leave = visitEnd(poi, dayStart);
-                int over = overrun(poi, leave);
-                if (better(over, leave, bestOverrun, bestLeave)) {
+                int leave = visitEnd(pois.get(i), dayStart);
+                if (leave < bestLeave) {
                     bestLeave = leave;
-                    bestOverrun = over;
                     start = i;
                 }
             }
         }
-        // find the next poi from the remainder
         order[0] = start;
         used[start] = true;
         int clock = visitEnd(pois.get(start), dayStart);
@@ -272,14 +253,6 @@ public class RoutePlanner {
             list.add(i);
         }
         return list;
-    }
-
-    private int[] identityArray(int n) {
-        int[] order = new int[n];
-        for (int i = 0; i < n; i++) {
-            order[i] = i;
-        }
-        return order;
     }
 
     // ------------------------------------------------------------------ timeline

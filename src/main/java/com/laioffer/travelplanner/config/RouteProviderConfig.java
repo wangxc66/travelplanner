@@ -37,7 +37,8 @@ public class RouteProviderConfig {
                                        @Value("${travelplanner.google.api-key:}") String googleKey,
                                        @Value("${travelplanner.google.routes-base-url}") String googleUrl,
                                        @Value("${travelplanner.osrm.enabled:true}") boolean osrmEnabled,
-                                       @Value("${travelplanner.osrm.base-url}") String osrmUrl) {
+                                       @Value("${travelplanner.osrm.base-url}") String osrmUrl,
+                                       @Value("${travelplanner.osrm.matrix-batch-size:25}") int osrmMatrixBatchSize) {
         var cache = cacheManager.getCache(CacheConfig.TRAVEL_MATRIX);
         RouteProvider estimated = new EstimatedRouteProvider(estimator);
 
@@ -49,7 +50,7 @@ public class RouteProviderConfig {
             log.info("Routing: OSRM at {} — real street geometry, no API key. Walking and transit "
                     + "durations are modelled from real road distance; set travelplanner.google.api-key "
                     + "for fully real numbers.", osrmUrl);
-            return new OsrmRouteProvider(osrmUrl, estimated, estimator, cache);
+            return new OsrmRouteProvider(osrmUrl, estimated, estimator, cache, osrmMatrixBatchSize);
         }
         log.info("Routing: offline straight-line estimates — the map draws direct lines between stops.");
         return estimated;
