@@ -7,7 +7,10 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Orders the POIs of a single day and turns that order into a clock timeline.
@@ -18,17 +21,24 @@ import java.util.List;
  * first minimize minutes spent inside a closed venue, then minimize the time the day ends, which
  * counts travel and waiting together.
  *
- * <p>For the day sizes a human actually plans (n &le; 12) we solve it <em>exactly</em> with Held-Karp
- * bitmask DP over (visited set, last stop) in O(n^2 * 2^n): the DP value is the earliest achievable
- * departure clock, and arriving earlier is never worse because waiting is always allowed. Above that
- * we fall back to earliest-completion greedy plus 2-opt, which lands within a few percent in
- * milliseconds.
+ * <p>For at most 12 movable stops we solve the soft-time-window objective exactly with a multi-label
+ * Held-Karp search. Each (visited movable set, last stop) state keeps the non-dominated
+ * (closed minutes, departure clock) labels; keeping only one label is not exact because a slightly
+ * worse partial violation can leave enough time to avoid a much larger violation later. Locked stops
+ * remain in the full route and are forced into their original slots. Larger days use a deterministic
+ * earliest-completion seed followed by 2-opt, with the user's current order retained as a no-worse
+ * baseline.
  */
 @Service
 public class RoutePlanner {
 
     /** Above this many stops per day, exact DP is replaced by the heuristic. */
-    private static final int EXACT_LIMIT = 12;
+    static final int EXACT_LIMIT = 12;
+
+    enum Algorithm {
+        HELD_KARP,
+        GREEDY_TWO_OPT
+    }
 
     private final RouteProvider routes;
 
@@ -38,32 +48,54 @@ public class RoutePlanner {
 
     // ------------------------------------------------------------------ ordering
 
+    /** Compatibility overload for callers that only pin the first stop. */
+    public List<Integer> optimizeOrder(List<Poi> pois, TravelMode mode, int dayStartHour, boolean lockFirst) {
+        List<Boolean> locked = new ArrayList<>(pois.size());
+        for (int i = 0; i < pois.size(); i++) {
+            locked.add(lockFirst && i == 0);
+        }
+        return optimizeOrder(pois, mode, dayStartHour, locked);
+    }
+
     /**
-     * @param lockFirst keep the current first stop as the day's starting point (hotel, breakfast…)
+     * Orders a complete day while forcing every locked POI to remain in its original slot.
+     *
+     * @param lockedPositions one flag per POI; a true value pins that POI to the same list index
      * @return indices into {@code pois}, in the recommended visiting order
      */
-    public List<Integer> optimizeOrder(List<Poi> pois, TravelMode mode, int dayStartHour, boolean lockFirst) {
+    public List<Integer> optimizeOrder(List<Poi> pois, TravelMode mode, int dayStartHour,
+                                       List<Boolean> lockedPositions) {
         int n = pois.size();
-        if (n <= 2) {
+        if (lockedPositions.size() != n) {
+            throw new IllegalArgumentException("lockedPositions must contain one flag per POI");
+        }
+        if (n <= 1) {
             return identity(n);
         }
+
+        boolean[] locked = new boolean[n];
+        int movableCount = 0;
+        for (int i = 0; i < n; i++) {
+            locked[i] = Boolean.TRUE.equals(lockedPositions.get(i));
+            if (!locked[i]) {
+                movableCount++;
+            }
+        }
+        if (movableCount <= 1) {
+            return identity(n);
+        }
+
         int[][] cost = routes.matrix(pois, mode);
-        int dayStart = dayStartHour * 60;
+        validateMatrix(cost, n);
+        int dayStart = Math.multiplyExact(dayStartHour, 60);
         int[] order;
-        if (n <= EXACT_LIMIT) {
-            order = heldKarp(pois, cost, dayStart, lockFirst);
+        if (algorithmFor(movableCount) == Algorithm.HELD_KARP) {
+            order = heldKarp(pois, cost, dayStart, locked, movableCount);
         } else {
             int[] original = identityArray(n);
-            int[] optimized = twoOpt(
-                    greedyEarliestFinish(pois, cost, dayStart, lockFirst),
-                    pois, cost, dayStart, lockFirst);
-
-            // A heuristic is allowed to miss the global optimum, but clicking Optimize must never
-            // make the user's existing schedule worse. Keep the original order on ties as well so
-            // we do not surprise the user with a reorder that provides no measurable benefit.
-            order = score(optimized, pois, cost, dayStart) < score(original, pois, cost, dayStart)
-                    ? optimized
-                    : original;
+            int[] greedy = greedyEarliestFinish(pois, cost, dayStart, locked);
+            int[] seed = compareOrders(greedy, original, pois, cost, dayStart) < 0 ? greedy : original;
+            order = twoOpt(seed, pois, cost, dayStart, locked);
         }
         List<Integer> result = new ArrayList<>(n);
         for (int i : order) {
@@ -72,7 +104,23 @@ public class RoutePlanner {
         return result;
     }
 
+    static Algorithm algorithmFor(int movableStops) {
+        return movableStops <= EXACT_LIMIT ? Algorithm.HELD_KARP : Algorithm.GREEDY_TWO_OPT;
+    }
+
     // --- the two ingredients every candidate order is judged on ---
+
+    private record Visit(int leaveMinutes, int closedMinutes) {
+    }
+
+    private record Objective(int closedMinutes, int endMinutes) {
+    }
+
+    private record StateKey(int mask, int last) {
+    }
+
+    private record Label(int mask, int last, int clock, int closedMinutes, int[] path) {
+    }
 
     private static int openMinutes(Poi poi) {
         return poi.isAlwaysOpen() ? 0 : poi.getOpenHour() * 60;
@@ -82,180 +130,271 @@ public class RoutePlanner {
         return poi.isAlwaysOpen() ? Integer.MAX_VALUE / 4 : poi.getCloseHour() * 60;
     }
 
-    /** Departure clock after visiting {@code poi}, respecting its opening time. */
-    private static int visitEnd(Poi poi, int arrive) {
-        return Math.max(arrive, openMinutes(poi)) + poi.getAvgVisitMinutes();
-    }
-
-    /** Minutes of the visit that fall after closing time — what we refuse to trade away. */
-    private static int overrun(Poi poi, int leave) {
-        return Math.max(0, leave - closeMinutes(poi));
+    /** The overlap between the actual visit interval and the time after the venue closes. */
+    private static Visit visit(Poi poi, int arrive) {
+        int start = Math.max(arrive, openMinutes(poi));
+        int leave = Math.addExact(start, poi.getAvgVisitMinutes());
+        int closed = poi.isAlwaysOpen() ? 0 : Math.max(0, leave - Math.max(start, closeMinutes(poi)));
+        return new Visit(leave, closed);
     }
 
     /**
      * Exact open-path TSP with time windows.
      *
-     * <p>{@code clock[mask][last]} is the earliest we can be done with {@code last} having visited
-     * exactly {@code mask}; {@code overrun[mask][last]} is the closed-venue time accumulated on the
-     * way. States are compared on (overrun, clock), so a schedule that respects closing times always
-     * beats a marginally shorter one that does not.
+     * <p>The bitmask contains movable POIs only. Full route positions are still processed in order, so
+     * locked POIs contribute travel, visit duration and opening-hour effects while being forced into
+     * their original slots. A state keeps every non-dominated (closed minutes, clock) label.
      */
-    private int[] heldKarp(List<Poi> pois, int[][] cost, int dayStart, boolean lockFirst) {
+    private int[] heldKarp(List<Poi> pois, int[][] cost, int dayStart,
+                           boolean[] locked, int movableCount) {
         int n = pois.size();
-        final int full = (1 << n) - 1;
-        final int inf = Integer.MAX_VALUE / 4;
-        int[][] clock = new int[1 << n][n];
-        int[][] overrun = new int[1 << n][n];
-        int[][] parent = new int[1 << n][n];
-        for (int i = 0; i < clock.length; i++) {
-            Arrays.fill(clock[i], inf);
-            Arrays.fill(overrun[i], inf);
-            Arrays.fill(parent[i], -1);
-        }
-
+        int[] movableBit = new int[n];
+        Arrays.fill(movableBit, -1);
+        int bit = 0;
         for (int i = 0; i < n; i++) {
-            if (lockFirst && i != 0) {
-                continue;
+            if (!locked[i]) {
+                movableBit[i] = bit++;
             }
-            Poi poi = pois.get(i);
-            int leave = visitEnd(poi, dayStart);
-            clock[1 << i][i] = leave;
-            overrun[1 << i][i] = overrun(poi, leave);
         }
 
-        for (int mask = 1; mask <= full; mask++) {
-            for (int last = 0; last < n; last++) {
-                if ((mask & (1 << last)) == 0 || clock[mask][last] >= inf) {
-                    continue;
-                }
-                for (int next = 0; next < n; next++) {
-                    if ((mask & (1 << next)) != 0) {
+        Map<StateKey, List<Label>> states = new HashMap<>();
+        Label initial = new Label(0, -1, dayStart, 0, new int[0]);
+        states.put(new StateKey(0, -1), new ArrayList<>(List.of(initial)));
+
+        for (int position = 0; position < n; position++) {
+            Map<StateKey, List<Label>> nextStates = new HashMap<>();
+            for (List<Label> labels : states.values()) {
+                for (Label label : labels) {
+                    if (locked[position]) {
+                        addTransition(nextStates, label, position, label.mask(), pois, cost);
                         continue;
                     }
-                    Poi poi = pois.get(next);
-                    int leave = visitEnd(poi, clock[mask][last] + cost[last][next]);
-                    int over = overrun[mask][last] + overrun(poi, leave);
-                    int nextMask = mask | (1 << next);
-                    if (better(over, leave, overrun[nextMask][next], clock[nextMask][next])) {
-                        clock[nextMask][next] = leave;
-                        overrun[nextMask][next] = over;
-                        parent[nextMask][next] = last;
+                    for (int candidate = 0; candidate < n; candidate++) {
+                        int candidateBit = movableBit[candidate];
+                        if (candidateBit < 0 || (label.mask() & (1 << candidateBit)) != 0) {
+                            continue;
+                        }
+                        addTransition(nextStates, label, candidate,
+                                label.mask() | (1 << candidateBit), pois, cost);
                     }
                 }
             }
+            states = nextStates;
         }
 
-        int bestEnd = -1;
-        for (int i = 0; i < n; i++) {
-            if (clock[full][i] < inf
-                    && (bestEnd < 0 || better(overrun[full][i], clock[full][i], overrun[full][bestEnd], clock[full][bestEnd]))) {
-                bestEnd = i;
+        int fullMask = (1 << movableCount) - 1;
+        Label best = null;
+        for (Map.Entry<StateKey, List<Label>> entry : states.entrySet()) {
+            if (entry.getKey().mask() != fullMask) {
+                continue;
+            }
+            for (Label label : entry.getValue()) {
+                if (best == null || compareLabels(label, best) < 0) {
+                    best = label;
+                }
             }
         }
-
-        int[] order = new int[n];
-        int mask = full;
-        int cur = bestEnd;
-        for (int pos = n - 1; pos >= 0; pos--) {
-            order[pos] = cur;
-            int prev = parent[mask][cur];
-            mask ^= (1 << cur);
-            cur = prev;
+        if (best == null) {
+            throw new IllegalStateException("Exact route search produced no complete order");
         }
-        return order;
+        return best.path();
     }
 
-    private static boolean better(int overrunA, int clockA, int overrunB, int clockB) {
-        return overrunA != overrunB ? overrunA < overrunB : clockA < clockB;
+    private void addTransition(Map<StateKey, List<Label>> states, Label previous, int next,
+                               int nextMask, List<Poi> pois, int[][] cost) {
+        int arrive = previous.clock();
+        if (previous.last() >= 0) {
+            arrive = Math.addExact(arrive, cost[previous.last()][next]);
+        }
+        Visit visit = visit(pois.get(next), arrive);
+        Label candidate = new Label(nextMask, next, visit.leaveMinutes(),
+                previous.closedMinutes() + visit.closedMinutes(), append(previous.path(), next));
+        addPareto(states, candidate);
+    }
+
+    private void addPareto(Map<StateKey, List<Label>> states, Label candidate) {
+        StateKey key = new StateKey(candidate.mask(), candidate.last());
+        List<Label> labels = states.computeIfAbsent(key, ignored -> new ArrayList<>());
+        for (Iterator<Label> iterator = labels.iterator(); iterator.hasNext(); ) {
+            Label existing = iterator.next();
+            if (sameObjective(existing, candidate)) {
+                if (comparePaths(existing.path(), candidate.path()) <= 0) {
+                    return;
+                }
+                iterator.remove();
+            } else if (dominates(existing, candidate)) {
+                return;
+            } else if (dominates(candidate, existing)) {
+                iterator.remove();
+            }
+        }
+        labels.add(candidate);
+    }
+
+    private static boolean sameObjective(Label a, Label b) {
+        return a.closedMinutes() == b.closedMinutes() && a.clock() == b.clock();
+    }
+
+    private static boolean dominates(Label a, Label b) {
+        return a.closedMinutes() <= b.closedMinutes() && a.clock() <= b.clock();
+    }
+
+    private static int compareLabels(Label a, Label b) {
+        int objective = compareObjectives(
+                new Objective(a.closedMinutes(), a.clock()),
+                new Objective(b.closedMinutes(), b.clock()));
+        return objective != 0 ? objective : comparePaths(a.path(), b.path());
     }
 
     /** Greedy construction: at every step take the stop we can be finished with soonest. */
-    private int[] greedyEarliestFinish(List<Poi> pois, int[][] cost, int dayStart, boolean lockFirst) {
+    private int[] greedyEarliestFinish(List<Poi> pois, int[][] cost, int dayStart, boolean[] locked) {
         int n = pois.size();
         boolean[] used = new boolean[n];
         int[] order = new int[n];
-        // step 1: find the start
-        int start = 0;
-        if (!lockFirst) {
-            int bestLeave = Integer.MAX_VALUE;
-            int bestOverrun = Integer.MAX_VALUE;
-            for (int i = 0; i < n; i++) {
-                Poi poi = pois.get(i);
-                int leave = visitEnd(poi, dayStart);
-                int over = overrun(poi, leave);
-                if (better(over, leave, bestOverrun, bestLeave)) {
-                    bestLeave = leave;
-                    bestOverrun = over;
-                    start = i;
-                }
+        int clock = dayStart;
+        int previous = -1;
+        for (int pos = 0; pos < n; pos++) {
+            if (locked[pos]) {
+                int next = pos;
+                int arrive = previous < 0 ? clock : Math.addExact(clock, cost[previous][next]);
+                Visit visit = visit(pois.get(next), arrive);
+                order[pos] = next;
+                used[next] = true;
+                previous = next;
+                clock = visit.leaveMinutes();
+                continue;
             }
-        }
-        // find the next poi from the remainder
-        order[0] = start;
-        used[start] = true;
-        int clock = visitEnd(pois.get(start), dayStart);
-        for (int pos = 1; pos < n; pos++) {
-            int from = order[pos - 1];
             int bestNext = -1;
             int bestLeave = Integer.MAX_VALUE;
-            int bestOverrun = Integer.MAX_VALUE;
+            int bestClosed = Integer.MAX_VALUE;
             for (int j = 0; j < n; j++) {
-                if (used[j]) {
+                if (locked[j] || used[j]) {
                     continue;
                 }
-                int leave = visitEnd(pois.get(j), clock + cost[from][j]);
-                int over = overrun(pois.get(j), leave);
-                if (bestNext < 0 || better(over, leave, bestOverrun, bestLeave)) {
+                int arrive = previous < 0 ? clock : Math.addExact(clock, cost[previous][j]);
+                Visit visit = visit(pois.get(j), arrive);
+                if (bestNext < 0
+                        || compareObjectives(new Objective(visit.closedMinutes(), visit.leaveMinutes()),
+                        new Objective(bestClosed, bestLeave)) < 0
+                        || (visit.closedMinutes() == bestClosed && visit.leaveMinutes() == bestLeave && j < bestNext)) {
                     bestNext = j;
-                    bestLeave = leave;
-                    bestOverrun = over;
+                    bestLeave = visit.leaveMinutes();
+                    bestClosed = visit.closedMinutes();
                 }
             }
             order[pos] = bestNext;
             used[bestNext] = true;
+            previous = bestNext;
             clock = bestLeave;
         }
         return order;
     }
 
     /** Segment-reversal improvement, scored on the full day schedule rather than distance alone. */
-    private int[] twoOpt(int[] order, List<Poi> pois, int[][] cost, int dayStart, boolean lockFirst) {
-        int n = order.length;
-        int from = lockFirst ? 1 : 0;
-        long best = score(order, pois, cost, dayStart);
+    private int[] twoOpt(int[] seed, List<Poi> pois, int[][] cost, int dayStart, boolean[] locked) {
+        int[] movableOrder = new int[(int) java.util.stream.IntStream.range(0, locked.length)
+                .filter(i -> !locked[i]).count()];
+        int cursor = 0;
+        for (int position = 0; position < seed.length; position++) {
+            if (!locked[position]) {
+                movableOrder[cursor++] = seed[position];
+            }
+        }
+
+        int[] bestOrder = seed.clone();
+        Objective best = score(bestOrder, pois, cost, dayStart);
         boolean improved = true;
         int guard = 0;
         while (improved && guard++ < 100) {
             improved = false;
-            for (int i = from; i < n - 1; i++) {
-                for (int j = i + 1; j < n; j++) {
-                    reverse(order, i, j);
-                    long candidate = score(order, pois, cost, dayStart);
-                    if (candidate < best) {
+            for (int i = 0; i < movableOrder.length - 1; i++) {
+                for (int j = i + 1; j < movableOrder.length; j++) {
+                    reverse(movableOrder, i, j);
+                    int[] candidateOrder = mergeLocked(movableOrder, locked);
+                    Objective candidate = score(candidateOrder, pois, cost, dayStart);
+                    int comparison = compareObjectives(candidate, best);
+                    if (comparison < 0 || (comparison == 0 && comparePaths(candidateOrder, bestOrder) < 0)) {
                         best = candidate;
+                        bestOrder = candidateOrder;
                         improved = true;
                     } else {
-                        reverse(order, i, j);
+                        reverse(movableOrder, i, j);
                     }
                 }
             }
         }
-        return order;
+        return bestOrder;
     }
 
-    /** Lexicographic (overrun, end clock) folded into one comparable number. */
-    private long score(int[] order, List<Poi> pois, int[][] cost, int dayStart) {
+    private Objective score(int[] order, List<Poi> pois, int[][] cost, int dayStart) {
         int clock = dayStart;
-        int over = 0;
+        int closed = 0;
         for (int pos = 0; pos < order.length; pos++) {
             if (pos > 0) {
-                clock += cost[order[pos - 1]][order[pos]];
+                clock = Math.addExact(clock, cost[order[pos - 1]][order[pos]]);
             }
-            Poi poi = pois.get(order[pos]);
-            clock = visitEnd(poi, clock);
-            over += overrun(poi, clock);
+            Visit visit = visit(pois.get(order[pos]), clock);
+            clock = visit.leaveMinutes();
+            closed += visit.closedMinutes();
         }
-        return over * 100_000L + clock;
+        return new Objective(closed, clock);
+    }
+
+    private int compareOrders(int[] a, int[] b, List<Poi> pois, int[][] cost, int dayStart) {
+        int objective = compareObjectives(score(a, pois, cost, dayStart), score(b, pois, cost, dayStart));
+        return objective != 0 ? objective : comparePaths(a, b);
+    }
+
+    private static int compareObjectives(Objective a, Objective b) {
+        int closed = Integer.compare(a.closedMinutes(), b.closedMinutes());
+        return closed != 0 ? closed : Integer.compare(a.endMinutes(), b.endMinutes());
+    }
+
+    private static int comparePaths(int[] a, int[] b) {
+        for (int i = 0; i < Math.min(a.length, b.length); i++) {
+            int comparison = Integer.compare(a[i], b[i]);
+            if (comparison != 0) {
+                return comparison;
+            }
+        }
+        return Integer.compare(a.length, b.length);
+    }
+
+    private static int[] append(int[] path, int value) {
+        int[] result = Arrays.copyOf(path, path.length + 1);
+        result[path.length] = value;
+        return result;
+    }
+
+    private static void validateMatrix(int[][] cost, int size) {
+        if (cost == null || cost.length != size) {
+            throw new IllegalArgumentException("route matrix must be " + size + " x " + size);
+        }
+        for (int from = 0; from < size; from++) {
+            if (cost[from] == null || cost[from].length != size) {
+                throw new IllegalArgumentException("route matrix must be " + size + " x " + size);
+            }
+            for (int to = 0; to < size; to++) {
+                if (cost[from][to] < 0) {
+                    throw new IllegalArgumentException(
+                            "route matrix contains a negative cost at [" + from + "][" + to + "]");
+                }
+                if (cost[from][to] == Integer.MAX_VALUE) {
+                    throw new IllegalArgumentException(
+                            "route matrix contains an unreachable edge at [" + from + "][" + to
+                                    + "]; the provider must supply its deterministic fallback estimate");
+                }
+            }
+        }
+    }
+
+    private static int[] mergeLocked(int[] movableOrder, boolean[] locked) {
+        int[] fullOrder = new int[locked.length];
+        int cursor = 0;
+        for (int position = 0; position < locked.length; position++) {
+            fullOrder[position] = locked[position] ? position : movableOrder[cursor++];
+        }
+        return fullOrder;
     }
 
     private void reverse(int[] order, int i, int j) {
