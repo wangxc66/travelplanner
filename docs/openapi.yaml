@@ -1,0 +1,926 @@
+openapi: 3.0.3
+info:
+  title: TripCanvas Travel Planner API
+  version: 0.1.0
+  description: |
+    The REST contract between the TripCanvas React client and Spring Boot service.
+    Requests and response field names in this document mirror the running backend.
+
+    The API never sends localized presentation text as a contract. User-facing
+    notices and errors carry stable semantic codes plus parameters; the client
+    renders those codes in the active language and falls back to `message` only
+    when it has no translation.
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+tags:
+  - name: Authentication
+  - name: Catalog
+  - name: Trips
+paths:
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register an account and issue a JWT
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              username: ziheng
+              password: strong-password
+              displayName: Ziheng
+      responses:
+        '200':
+          description: Account created and authenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '409':
+          description: The username is already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                message: Username already taken
+                code: error.usernameTaken
+                params: {}
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate and issue a JWT
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: ziheng
+              password: strong-password
+      responses:
+        '200':
+          description: Authentication succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Required fields are missing or the credentials are invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              examples:
+                invalidRequest:
+                  value:
+                    message: username must not be blank
+                    code: error.invalidRequest
+                    params: {}
+                badCredentials:
+                  value:
+                    message: Wrong username or password
+                    code: error.badCredentials
+                    params: {}
+  /api/cities:
+    get:
+      tags: [Catalog]
+      summary: List available destination cities
+      operationId: listCities
+      responses:
+        '200':
+          description: City catalog.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/City'
+  /api/cities/{cityId}/pois:
+    get:
+      tags: [Catalog]
+      summary: Search POIs in a city
+      operationId: searchPois
+      parameters:
+        - $ref: '#/components/parameters/CityId'
+        - name: keyword
+          in: query
+          required: false
+          description: Case-insensitive keyword filter; the default is an empty string.
+          schema:
+            type: string
+            default: ''
+        - name: category
+          in: query
+          required: false
+          description: Exact category filter; the default is an empty string.
+          schema:
+            type: string
+            default: ''
+        - name: limit
+          in: query
+          required: false
+          description: Result limit. The service clamps supplied values to 1 through 200.
+          schema:
+            type: integer
+            default: 60
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Matching POIs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Poi'
+  /api/cities/{cityId}/categories:
+    get:
+      tags: [Catalog]
+      summary: List POI categories available in a city
+      operationId: listCategories
+      parameters:
+        - $ref: '#/components/parameters/CityId'
+      responses:
+        '200':
+          description: Category names in the city catalog.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+  /api/trips:
+    get:
+      tags: [Trips]
+      summary: List the authenticated user's trips
+      operationId: listTrips
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Trip summaries belonging to the caller.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TripSummary'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Trips]
+      summary: Create a trip for the authenticated user
+      operationId: createTrip
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTripRequest'
+            example:
+              cityId: 1
+              title: Tokyo spring break
+              startDate: '2026-09-01'
+              numDays: 3
+      responses:
+        '200':
+          description: Created full trip, including its initially empty days.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CityNotFound'
+  /api/trips/{tripId}:
+    get:
+      tags: [Trips]
+      summary: Get one full trip
+      operationId: getTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: Full, ordered trip view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TripNotFound'
+    patch:
+      tags: [Trips]
+      summary: Update absolute trip properties
+      description: Repeating the same body produces the same trip state.
+      operationId: updateTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTripRequest'
+      responses:
+        '200':
+          description: Updated full trip.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TripNotFound'
+    delete:
+      tags: [Trips]
+      summary: Delete a trip
+      operationId: deleteTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: The trip was deleted; the current implementation returns an empty body.
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TripNotFound'
+  /api/trips/{tripId}/items:
+    post:
+      tags: [Trips]
+      summary: Add a POI to one trip day
+      operationId: addTripItem
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddItemRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The trip or POI was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: This POI is already planned in the trip.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                message: Senso-ji is already in this trip
+                code: error.poiAlreadyPlanned
+                params:
+                  name: Senso-ji
+  /api/trips/{tripId}/items/{itemId}:
+    delete:
+      tags: [Trips]
+      summary: Remove an itinerary item
+      operationId: removeTripItem
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/ItemId'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The trip or item was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/trips/{tripId}/items/{itemId}/move:
+    post:
+      tags: [Trips]
+      summary: Move an itinerary item to a day and optional sequence position
+      description: Use absolute day and sequence values so that a repeated request can converge on the same state.
+      operationId: moveTripItem
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/ItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveItemRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The trip or item was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/trips/{tripId}/items/{itemId}/lock:
+    post:
+      tags: [Trips]
+      summary: Toggle an itinerary item's lock state
+      description: |
+        A locked item retains its position during optimization. This legacy toggle endpoint is not
+        idempotent: do not automatically retry it after an uncertain network failure.
+      operationId: toggleTripItemLock
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/ItemId'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The trip or item was not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/trips/{tripId}/days/{dayIndex}/order:
+    put:
+      tags: [Trips]
+      summary: Set the complete order of all items in one day
+      description: Idempotent when `itemIds` contains exactly the day’s current item IDs in the desired order.
+      operationId: reorderTripDay
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/DayIndex'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '400':
+          description: The day is out of range or the item set does not exactly match that day.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TripNotFound'
+  /api/trips/{tripId}/days/{dayIndex}/optimize:
+    post:
+      tags: [Trips]
+      summary: Optimize the order and schedule of one trip day
+      operationId: optimizeTripDay
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/DayIndex'
+        - $ref: '#/components/parameters/TravelMode'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TripNotFound'
+  /api/trips/{tripId}/optimize:
+    post:
+      tags: [Trips]
+      summary: Optimize every day in a trip
+      operationId: optimizeTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/TravelMode'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TripNotFound'
+  /api/trips/{tripId}/rebalance:
+    post:
+      tags: [Trips]
+      summary: Rebalance overloaded days, then optimize affected days
+      operationId: rebalanceTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          $ref: '#/components/responses/FullTrip'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/SignInRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TripNotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    CityId:
+      name: cityId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    TripId:
+      name: tripId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    ItemId:
+      name: itemId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    DayIndex:
+      name: dayIndex
+      in: path
+      required: true
+      description: One-based trip day index.
+      schema:
+        type: integer
+        minimum: 1
+    TravelMode:
+      name: mode
+      in: query
+      required: false
+      description: Overrides the trip's default travel mode for this optimization request.
+      schema:
+        $ref: '#/components/schemas/TravelMode'
+  responses:
+    FullTrip:
+      description: Full recomputed trip view. All trip mutations return this shape except trip deletion.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Trip'
+    InvalidRequest:
+      description: Request validation or a business input rule failed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            message: numDays must be greater than or equal to 1
+            code: error.invalidRequest
+            params: {}
+    SignInRequired:
+      description: The caller has no valid authenticated session.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            message: Please sign in
+            code: error.signInRequired
+            params: {}
+    Forbidden:
+      description: The authenticated caller is not allowed to perform the operation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    CityNotFound:
+      description: The requested city does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            message: City not found
+            code: error.cityNotFound
+            params: {}
+    TripNotFound:
+      description: The requested trip does not exist or does not belong to the caller.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            message: Trip not found
+            code: error.tripNotFound
+            params: {}
+  schemas:
+    ApiError:
+      type: object
+      required: [message, code, params]
+      properties:
+        message:
+          type: string
+          description: English fallback text; the frontend should prefer `code` for localization.
+        code:
+          type: string
+          description: Stable semantic error key such as `error.tripNotFound`.
+        params:
+          type: object
+          additionalProperties:
+            type: string
+          description: Values used to render the semantic error code.
+    RegisterRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 1
+          format: password
+        displayName:
+          type: string
+          nullable: true
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 1
+          format: password
+    AuthResponse:
+      type: object
+      required: [token, username]
+      properties:
+        token:
+          type: string
+          description: "JWT supplied in later requests as `Authorization: Bearer <token>`."
+        username:
+          type: string
+        displayName:
+          type: string
+          nullable: true
+    City:
+      type: object
+      required: [id, name, country, lat, lng, defaultZoom, poiCount]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        country:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        defaultZoom:
+          type: integer
+        heroEmoji:
+          type: string
+          nullable: true
+        poiCount:
+          type: integer
+          format: int64
+    Poi:
+      type: object
+      required: [id, name, category, lat, lng, rating, avgVisitMinutes, alwaysOpen]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        category:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        rating:
+          type: number
+          format: double
+        avgVisitMinutes:
+          type: integer
+        openLabel:
+          type: string
+          nullable: true
+          description: Language-neutral clock range, absent when `alwaysOpen` is true.
+        alwaysOpen:
+          type: boolean
+        description:
+          type: string
+          nullable: true
+    TravelMode:
+      type: string
+      enum: [WALK, TRANSIT, DRIVE]
+    CreateTripRequest:
+      type: object
+      required: [cityId, numDays]
+      properties:
+        cityId:
+          type: integer
+          format: int64
+        title:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+          nullable: true
+        numDays:
+          type: integer
+          minimum: 1
+          maximum: 15
+    UpdateTripRequest:
+      type: object
+      description: All properties are optional; supplied values replace the stored values.
+      properties:
+        title:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+          nullable: true
+        numDays:
+          type: integer
+          minimum: 1
+          maximum: 15
+          nullable: true
+        dayStartHour:
+          type: integer
+          nullable: true
+        defaultMode:
+          $ref: '#/components/schemas/TravelMode'
+    AddItemRequest:
+      type: object
+      required: [poiId, dayIndex]
+      properties:
+        poiId:
+          type: integer
+          format: int64
+        dayIndex:
+          type: integer
+          minimum: 1
+    MoveItemRequest:
+      type: object
+      required: [dayIndex]
+      properties:
+        dayIndex:
+          type: integer
+          minimum: 1
+        seq:
+          type: integer
+          nullable: true
+          description: Target sequence position; omit to append using the service default.
+    ReorderRequest:
+      type: object
+      required: [itemIds]
+      properties:
+        itemIds:
+          type: array
+          description: Every item currently assigned to the day, exactly once, in desired order.
+          items:
+            type: integer
+            format: int64
+    Notice:
+      type: object
+      required: [code, params]
+      properties:
+        code:
+          type: string
+          example: warning.closesEarly
+        params:
+          type: object
+          additionalProperties:
+            type: string
+    Item:
+      type: object
+      required: [id, poi, seq, locked, travelMinutesFromPrev, travelKmFromPrev, warnings]
+      properties:
+        id:
+          type: integer
+          format: int64
+        poi:
+          $ref: '#/components/schemas/Poi'
+        seq:
+          type: integer
+        locked:
+          type: boolean
+        arriveTime:
+          type: string
+          nullable: true
+        leaveTime:
+          type: string
+          nullable: true
+        travelMinutesFromPrev:
+          type: integer
+        travelKmFromPrev:
+          type: number
+          format: double
+        polylineFromPrev:
+          type: string
+          nullable: true
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notice'
+    Day:
+      type: object
+      required: [dayIndex, items, visitMinutes, travelMinutes, totalMinutes, loadPercent, warnings]
+      properties:
+        dayIndex:
+          type: integer
+        date:
+          type: string
+          nullable: true
+          description: ISO-8601 date when the trip has a start date.
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Item'
+        visitMinutes:
+          type: integer
+        travelMinutes:
+          type: integer
+        totalMinutes:
+          type: integer
+        startTime:
+          type: string
+          nullable: true
+        endTime:
+          type: string
+          nullable: true
+        loadPercent:
+          type: integer
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notice'
+    Suggestion:
+      type: object
+      properties:
+        kind:
+          type: string
+        code:
+          type: string
+        params:
+          type: object
+          additionalProperties:
+            type: string
+        itemId:
+          type: integer
+          format: int64
+          nullable: true
+        fromDay:
+          type: integer
+          nullable: true
+        toDay:
+          type: integer
+          nullable: true
+    Trip:
+      type: object
+      required: [id, title, city, numDays, dayStartHour, defaultMode, days, suggestions, plannedCount]
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        city:
+          $ref: '#/components/schemas/City'
+        startDate:
+          type: string
+          nullable: true
+        numDays:
+          type: integer
+        dayStartHour:
+          type: integer
+        defaultMode:
+          $ref: '#/components/schemas/TravelMode'
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/Day'
+        suggestions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Suggestion'
+        plannedCount:
+          type: integer
+    TripSummary:
+      type: object
+      required: [id, title, cityName, numDays, plannedCount]
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        cityName:
+          type: string
+        heroEmoji:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          nullable: true
+        numDays:
+          type: integer
+        plannedCount:
+          type: integer
