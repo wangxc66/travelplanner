@@ -3,6 +3,7 @@ package com.laioffer.travelplanner.repository;
 import com.laioffer.travelplanner.entity.Poi;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.repository.query.Param;
 
 import java.util.List;
@@ -35,8 +36,25 @@ public interface PoiRepository extends JpaRepository<Poi, Long> {
                      @Param("keyword") String keyword,
                      @Param("category") String category);
 
+    /** Same query with database-side limiting for the API's high-traffic search path. */
+    @Query("""
+            select p from Poi p
+            where p.city.id = :cityId
+              and (:keyword = '' or lower(p.name) like concat('%', :keyword, '%') escape '\\'
+                                 or lower(p.category) like concat('%', :keyword, '%') escape '\\'
+                                 or lower(p.description) like concat('%', :keyword, '%') escape '\\')
+              and (:category = '' or lower(p.category) = lower(:category))
+            order by p.rating desc, p.name asc, p.id asc
+            """)
+    List<Poi> search(@Param("cityId") Long cityId,
+                     @Param("keyword") String keyword,
+                     @Param("category") String category,
+                     Pageable pageable);
+
     @Query("select distinct p.category from Poi p where p.city.id = :cityId order by p.category")
     List<String> findCategories(@Param("cityId") Long cityId);
 
     long countByCityId(Long cityId);
+
+    boolean existsByCityIdAndName(Long cityId, String name);
 }

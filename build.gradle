@@ -23,12 +23,16 @@ repositories {
 
 
 dependencies {
-	//implementation 'org.springframework.boot:spring-boot-starter-webmvc' // REST API
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc' // REST API
 	implementation 'org.springframework.boot:spring-boot-starter-security' // Authentication
 	implementation 'org.springframework.boot:spring-boot-starter-data-jpa' // Database access
 	implementation 'org.springframework.boot:spring-boot-starter-validation' // Request validation
 	implementation 'org.springframework.boot:spring-boot-starter-cache' // Cache abstraction
+	implementation 'org.springframework.boot:spring-boot-starter-actuator' // Health and Micrometer metrics
 	implementation 'com.github.ben-manes.caffeine:caffeine:3.+' // POI / travel-matrix cache
+	implementation 'io.micrometer:micrometer-registry-prometheus' // Prometheus operations endpoint
+	implementation 'org.springframework.boot:spring-boot-starter-flyway' // Versioned schema ownership
+	runtimeOnly 'org.flywaydb:flyway-database-postgresql' // PostgreSQL Flyway support
 
 	implementation 'io.jsonwebtoken:jjwt-api:0.13.0' // JWT token generation
 	runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.13.0'

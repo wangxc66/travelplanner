@@ -4,6 +4,7 @@ import com.laioffer.travelplanner.entity.Poi;
 import com.laioffer.travelplanner.entity.TravelMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.cache.Cache;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.client.ClientHttpRequestFactory;
@@ -50,6 +51,13 @@ public class OsrmRouteProvider implements RouteProvider {
         this.client = RestClient.builder()
                 .baseUrl(baseUrl)
                 .requestFactory(timeouts())
+                .requestInterceptor((request, body, execution) -> {
+                    String correlationId = MDC.get("correlation_id");
+                    if (correlationId != null) {
+                        request.getHeaders().set("X-Correlation-ID", correlationId);
+                    }
+                    return execution.execute(request, body);
+                })
                 .build();
         this.fallback = fallback;
         this.estimator = estimator;
@@ -257,9 +265,9 @@ public class OsrmRouteProvider implements RouteProvider {
     private void degrade(String what, Exception e) {
         if (warned.compareAndSet(false, true)) {
             log.warn("OSRM unavailable for {} — falling back to straight-line estimates. Cause: {}",
-                    what, e.getMessage());
+                    what, e.getClass().getSimpleName());
         } else {
-            log.debug("OSRM call for {} failed: {}", what, e.getMessage());
+            log.debug("OSRM call for {} failed: {}", what, e.getClass().getSimpleName());
         }
     }
 }

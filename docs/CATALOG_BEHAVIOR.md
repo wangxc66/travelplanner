@@ -92,9 +92,8 @@ This is deliberate for week 3 — rejecting would change how existing clients be
 contract prefers `400` for out-of-range values, that is a `w3-API` decision and belongs in the same
 change as the OpenAPI freeze.
 
-The ceiling is currently applied **in the service, after the database has returned every matching
-row**. The response is correctly bounded; the query is not. Pushing the ceiling into SQL is deferred
-to week 4 (§7).
+The ceiling is applied in SQL with a page request and defensively re-applied while mapping DTOs.
+The service clamps direct callers too, so no code path can request an unbounded result.
 
 ### 3.6 Unknown city
 
@@ -172,16 +171,25 @@ Recorded here so review can see they were considered and postponed, not missed.
 
 | Item | Why it waits |
 | --- | --- |
-| Push `limit` into SQL via `Pageable` | Pure performance; the response is already bounded. Belongs with the index tuning that makes it measurable. |
-| Normalise the `poiSearch` cache key | The key uses raw parameters, so `"Temple"`, `"temple "` and `" TEMPLE"` occupy three entries with identical contents. Caching policy is explicitly `w4-CAT` scope. |
-| Remove the N+1 in `cities()` | One count query per city. Three cities today; real cost only appears alongside the wider query tuning. |
 | `404` for an unknown city (§3.6) | Contract change, needs `w3-API` agreement. |
 | Reject rather than clamp `limit` (§3.5) | Contract change, same gate. |
 | Expose `cityId` / raw opening hours on `PoiDto` | Contract change, same gate. The frontend cannot currently compute "open now". |
 | Decouple `openLabel` from `RoutePlanner.fmt` | Layering cleanup. `RoutePlanner` is being rewritten this week by `w3-RTE-EXACT` / `w3-RTE-LARGE`; touching it now only creates conflicts. |
-| Separate seed data from `DataSeeder` | Explicit `w4-CAT` scope. |
 
-## 8. Test coverage
+## 8. Performance and caching
+
+- POI search is limited in the database and ordered by `rating DESC, name ASC, id ASC`.
+- City POI counts use one grouped projection query rather than one count query per city.
+- Cities, per-city categories, and normalized POI searches use bounded six-hour Caffeine caches.
+- Equivalent keyword/category whitespace and case variants, plus clamped limit variants, share one
+  search cache entry.
+- The local interactive target is 100 consecutive warm-cache searches in under 250 ms. Production
+  monitoring should retain a per-request warm-read p95 target of 100 ms.
+
+Demo catalog data is isolated behind the `demo-seed` Spring profile and the
+`travelplanner.seed.enabled` property; production profiles do not load it.
+
+## 9. Test coverage
 
 | Rule | Test |
 | --- | --- |
@@ -199,6 +207,9 @@ Recorded here so review can see they were considered and postponed, not missed.
 | Distinct alphabetical categories (§4) | `PoiRepositoryTest.listsDistinctCategories` |
 | `openLabel` mapping (§6.1) | `CatalogServiceTest.mapsAlwaysOpenToNullLabel`, `mapsOpeningWindowToClockRange`, `mapsMidnightCloseAsNextDay` |
 | Full DTO mapping (§6) | `CatalogServiceTest.mapsAllFields` |
+| Canonical cache identity (§8) | `CatalogServiceTest.normalizesSearchCacheKey`, `CatalogCachingIntegrationTest.normalizedSearchesShareOneCacheEntry` |
+| City/category caching (§8) | `CatalogCachingIntegrationTest.citiesAndCategoriesAreCachedIndependently` |
+| Warm latency target (§8) | `CatalogCachingIntegrationTest.warmSearchMeetsInteractiveResponseTimeTarget` |
 
 Fixtures live in `CatalogFixtures`, deliberately separate from the demo seed in `DataSeeder`: the
 demo data exists to look good in a browser, changes whenever someone adds a nicer museum, and happens

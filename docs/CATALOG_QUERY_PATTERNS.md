@@ -34,8 +34,8 @@ Shape notes:
 - The keyword arrives already lower-cased and LIKE-escaped.
 - `ORDER BY` is a **total order**. Please keep `id` as the final term in any rewrite; the frontend and
   the future SQL-side `LIMIT` both depend on it.
-- The result ceiling is applied in Java today. Week 4 pushes it into SQL as `LIMIT` (default 60,
-  maximum 200), which will make the `ORDER BY` index-sensitive.
+- The result ceiling is pushed into SQL through `Pageable` (default 60, maximum 200), making the
+  `ORDER BY` index-sensitive. Java retains a defensive ceiling during DTO mapping.
 
 ### 1.2 Category list
 
@@ -47,18 +47,18 @@ SELECT DISTINCT p.category FROM poi p WHERE p.city_id = ? ORDER BY p.category
 
 ### 1.3 POI counts per city
 
-`PoiRepository.countByCityId`, behind `GET /api/cities` and the trip DTO.
+`PoiRepository.countByCityId`, used while assembling an individual trip DTO.
 
 ```sql
 SELECT count(*) FROM poi WHERE city_id = ?
 ```
 
-Called once per city today — an N+1 that week 4 replaces with a single `GROUP BY city_id`. Worth
-knowing before you size the index, since the grouped form wants `poi(city_id)` to be usable alone.
+City discovery uses one left-joined grouped projection, preserving cities with zero POIs while
+returning every count in one query.
 
 ### 1.4 City list
 
-`CityRepository.findAllByOrderByNameAsc`: full table scan of a handful of rows. No index needed.
+`CityRepository.findCatalog`: grouped city/POI-count projection ordered by city name and ID.
 
 ## 2. Requested indexes
 

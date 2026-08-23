@@ -4,6 +4,7 @@ import com.laioffer.travelplanner.entity.Poi;
 import com.laioffer.travelplanner.entity.TravelMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.cache.Cache;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
@@ -60,6 +61,13 @@ public class GoogleRoutesProvider implements RouteProvider {
                 .baseUrl(baseUrl)
                 .defaultHeader("X-Goog-Api-Key", apiKey)
                 .defaultHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .requestInterceptor((request, body, execution) -> {
+                    String correlationId = MDC.get("correlation_id");
+                    if (correlationId != null) {
+                        request.getHeaders().set("X-Correlation-ID", correlationId);
+                    }
+                    return execution.execute(request, body);
+                })
                 .build();
         this.fallback = fallback;
         this.cache = cache;
@@ -271,9 +279,9 @@ public class GoogleRoutesProvider implements RouteProvider {
         if (warned.compareAndSet(false, true)) {
             log.warn("Google Routes API unavailable for {} — falling back to offline estimates. "
                     + "Check travelplanner.google.api-key and that Routes API is enabled. Cause: {}",
-                    what, e.getMessage());
+                    what, e.getClass().getSimpleName());
         } else {
-            log.debug("Google Routes API call for {} failed: {}", what, e.getMessage());
+            log.debug("Google Routes API call for {} failed: {}", what, e.getClass().getSimpleName());
         }
     }
 }

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Pageable;
 
 import java.util.List;
 
@@ -40,14 +41,14 @@ class CatalogServiceTest {
         poiRepository = mock(PoiRepository.class);
         catalogService = new CatalogService(mock(CityRepository.class), poiRepository);
         city = CatalogFixtures.testville();
-        when(poiRepository.search(anyLong(), anyString(), anyString())).thenReturn(List.of());
+        when(poiRepository.search(anyLong(), anyString(), anyString(), any(Pageable.class))).thenReturn(List.of());
     }
 
     /** The keyword the repository actually received for a given user input. */
     private String keywordFor(String userInput) {
         catalogService.searchPois(1L, userInput, "", 60);
         ArgumentCaptor<String> keyword = ArgumentCaptor.forClass(String.class);
-        verify(poiRepository, atLeastOnce()).search(anyLong(), keyword.capture(), anyString());
+        verify(poiRepository, atLeastOnce()).search(anyLong(), keyword.capture(), anyString(), any(Pageable.class));
         return keyword.getAllValues().getLast();
     }
 
@@ -55,7 +56,7 @@ class CatalogServiceTest {
     private String categoryFor(String userInput) {
         catalogService.searchPois(1L, "", userInput, 60);
         ArgumentCaptor<String> category = ArgumentCaptor.forClass(String.class);
-        verify(poiRepository, atLeastOnce()).search(anyLong(), anyString(), category.capture());
+        verify(poiRepository, atLeastOnce()).search(anyLong(), anyString(), category.capture(), any(Pageable.class));
         return category.getAllValues().getLast();
     }
 
@@ -94,12 +95,37 @@ class CatalogServiceTest {
     void passesCategoryThrough() {
         assertThat(categoryFor("Food")).isEqualTo("Food");
         assertThat(categoryFor("food")).isEqualTo("food");
+        assertThat(categoryFor("  Food  ")).isEqualTo("Food");
+    }
+
+    @Test
+    @DisplayName("semantically equivalent searches have one canonical cache identity")
+    void normalizesSearchCacheKey() {
+        assertThat(CatalogService.searchCacheKey(1L, " Temple ", " FOOD ", 60))
+                .isEqualTo(CatalogService.searchCacheKey(1L, "temple", "food", 60));
+        assertThat(CatalogService.searchCacheKey(1L, "", "All", 0))
+                .isEqualTo(CatalogService.searchCacheKey(1L, null, null, 1));
+        assertThat(CatalogService.searchCacheKey(1L, "", "", 999))
+                .endsWith("|200");
+    }
+
+    @Test
+    @DisplayName("service-level callers receive the same bounded limit contract as HTTP callers")
+    void clampsLimitBeforeBuildingPageRequest() {
+        catalogService.searchPois(1L, "", "", 0);
+        catalogService.searchPois(1L, "", "", 999);
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(poiRepository, org.mockito.Mockito.times(2))
+                .search(anyLong(), anyString(), anyString(), pageable.capture());
+        assertThat(pageable.getAllValues()).extracting(Pageable::getPageSize)
+                .containsExactly(1, 200);
     }
 
     @Test
     @DisplayName("no search returns more rows than the caller asked for")
     void boundsResultCount() {
-        when(poiRepository.search(anyLong(), any(), any()))
+        when(poiRepository.search(anyLong(), any(), any(), any(Pageable.class)))
                 .thenReturn(CatalogFixtures.testvillePois(city));
 
         assertThat(catalogService.searchPois(1L, "", "", 3)).hasSize(3);
@@ -109,7 +135,7 @@ class CatalogServiceTest {
     @Test
     @DisplayName("the result order is the repository's order, untouched")
     void preservesRepositoryOrder() {
-        when(poiRepository.search(anyLong(), any(), any()))
+        when(poiRepository.search(anyLong(), any(), any(), any(Pageable.class)))
                 .thenReturn(CatalogFixtures.testvillePois(city));
 
         assertThat(catalogService.searchPois(1L, "", "", 60))

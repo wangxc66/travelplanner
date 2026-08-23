@@ -12,12 +12,14 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
+import jakarta.persistence.Table;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
 @Entity
+@Table(name = "trip")
 public class Trip {
 
     @Id
@@ -25,24 +27,30 @@ public class Trip {
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "user_id")
+    @JoinColumn(name = "user_id", nullable = false,
+            foreignKey = @jakarta.persistence.ForeignKey(name = "fk_trip_user"))
     private UserEntity user;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "city_id")
+    @JoinColumn(name = "city_id", nullable = false,
+            foreignKey = @jakarta.persistence.ForeignKey(name = "fk_trip_city"))
     private City city;
 
     @Column(nullable = false)
     private String title;
 
+    @Column(nullable = false)
     private LocalDate startDate;
 
     /** 1 - 15 days, enforced at the service layer. */
+    @Column(nullable = false)
     private int numDays;
 
+    @Column(nullable = false)
     private int dayStartHour;
 
     @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private TravelMode defaultMode;
 
     /**
