@@ -42,9 +42,12 @@ Expects `travelplanner` on `localhost:5432`. Same JPA mappings, `ddl-auto: updat
 
 `RoutePlannerTest` covers the basic scheduling behavior. `RoutePlannerExactTest` adds fixed-matrix
 brute-force, Pareto-window, deterministic tie, two-stop, lock, and 12/13 boundary fixtures;
-`TripServiceOptimizeDayTest` verifies lock-aware persistence integration. `RoutePlannerSloTest` checks
-the 12-stop exact solver against the fixed-matrix `P95 <= 500 ms` target. `PolylineCodecTest` checks the
-encoded-polyline codec against Google's reference example and round-trips leg stitching.
+`TripServiceOptimizeDayTest` verifies lock-aware, idempotent persistence and mode-consistent response
+integration. `OptimizationSummaryJsonTest` protects the additive API metadata, including the
+travel-time tie-break. `RoutePlannerSloTest` reports 4/8/12-stop scaling, retained-label counts and the
+12-stop fixed-matrix `P95 <= 500 ms` target. The Week 4 numbers and metric definitions are in
+[`docs/WEEK4_EXACT_ROUTE_BENCHMARK.md`](docs/WEEK4_EXACT_ROUTE_BENCHMARK.md). `PolylineCodecTest`
+checks the encoded-polyline codec against Google's reference example and round-trips leg stitching.
 
 <a id="design-notes"></a>
 
@@ -94,14 +97,15 @@ Optimize clicks on one day cost nothing. The public OSRM server is a courtesy de
 explicitly not for production; `travelplanner.osrm.enabled: false` turns it off.
 
 **Ordering a day is TSP with time windows.** `RoutePlanner` minimizes, lexicographically, (1) minutes
-spent inside a closed venue and (2) the time the day ends — which counts travel and waiting together.
-Minimizing raw travel alone produces schedules that are geometrically tidy and practically useless: it
-will send you to a bar that opens at 18:00 first thing in the morning. For at most 12 movable stops it
-uses multi-label Held-Karp: every `(visited set, last stop)` retains the non-dominated `(closed minutes,
-finish time)` labels needed for an exact soft-window result. Locked stops remain in the full route and
-are forced into their original slots. If a state has at most `P` labels, storage is `O(n·2ⁿ·P)` and the
-current list-based dominance checks are `O(n²·2ⁿ·P²)` in the worst case. Above 12 movable stops it
-falls back to deterministic earliest-completion greedy plus 2-opt scored on the full schedule.
+spent inside a closed venue, (2) the time the day ends — which counts travel and waiting together —
+and (3) total travel minutes. A stable original-index path breaks a complete tie. Minimizing raw travel
+alone produces schedules that are geometrically tidy and practically useless: it will send you to a
+bar that opens at 18:00 first thing in the morning. For at most 12 movable stops it uses multi-label
+Held-Karp: every `(visited set, last stop)` retains the tie-aware labels needed for an exact soft-window
+result. Locked stops remain in the full route and are forced into their original slots. If a state has
+at most `P` retained labels, storage is `O(n·2ⁿ·P)` and the current list-based dominance checks are
+`O(n²·2ⁿ·P²)` in the worst case. Above 12 movable stops it falls back to deterministic
+earliest-completion greedy plus 2-opt scored on the full schedule.
 
 **One read shape.** Every mutating endpoint returns the entire recomputed `TripDto` — days, clock
 timeline, per-leg distance, warnings, suggestions. The client never has to reconcile partial updates,

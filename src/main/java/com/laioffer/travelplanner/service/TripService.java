@@ -6,6 +6,9 @@ import com.laioffer.travelplanner.dto.Dtos.DayDto;
 import com.laioffer.travelplanner.dto.Dtos.ItemDto;
 import com.laioffer.travelplanner.dto.Dtos.MoveItemRequest;
 import com.laioffer.travelplanner.dto.Dtos.NoticeDto;
+import com.laioffer.travelplanner.dto.Dtos.OptimizationMetricsDto;
+import com.laioffer.travelplanner.dto.Dtos.OptimizationObjectiveDto;
+import com.laioffer.travelplanner.dto.Dtos.OptimizationSummaryDto;
 import com.laioffer.travelplanner.dto.Dtos.SuggestionDto;
 import com.laioffer.travelplanner.dto.Dtos.TripDto;
 import com.laioffer.travelplanner.dto.Dtos.TripSummaryDto;
@@ -229,35 +232,44 @@ public class TripService {
         Trip trip = load(user, tripId);
         int day = requireDay(trip, dayIndex);
         TravelMode mode = resolveMode(trip, modeOverride);
-        List<ItineraryItem> items = itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(tripId, day);
-        if (items.size() < 2) {
-            return detail(trip);
-        }
-
-        long movableCount = items.stream().filter(item -> !item.isLocked()).count();
-        if (movableCount <= 1) {
-            return detail(trip);
-        }
-
-        List<Poi> pois = items.stream().map(ItineraryItem::getPoi).toList();
-        List<Boolean> locked = items.stream().map(ItineraryItem::isLocked).toList();
-        List<Integer> order = routePlanner.optimizeOrder(pois, mode, trip.getDayStartHour(), locked);
-
-        List<ItineraryItem> reordered = order.stream().map(items::get).toList();
-        for (int i = 0; i < reordered.size(); i++) {
-            reordered.get(i).setSeq(i);
-        }
-        itemRepository.saveAll(reordered);
-        return detail(trip);
+        OptimizationSummaryDto result = optimizeAndPersistDay(trip, day, mode);
+        return detail(trip, mode, List.of(result));
     }
 
     @Transactional
     public TripDto optimizeAllDays(UserEntity user, Long tripId, String modeOverride) {
         Trip trip = load(user, tripId);
+        TravelMode mode = resolveMode(trip, modeOverride);
+        List<OptimizationSummaryDto> results = new ArrayList<>();
         for (int day = 1; day <= trip.getNumDays(); day++) {
-            optimizeDay(user, tripId, day, modeOverride);
+            results.add(optimizeAndPersistDay(trip, day, mode));
         }
-        return detail(load(user, tripId));
+        return detail(trip, mode, results);
+    }
+
+    /** One optimizer invocation and at most one persistence write; response rendering happens later. */
+    private OptimizationSummaryDto optimizeAndPersistDay(Trip trip, int day, TravelMode mode) {
+        List<ItineraryItem> items = itemRepository
+                .findByTripIdAndDayIndexOrderBySeqAsc(trip.getId(), day);
+        List<Poi> pois = items.stream().map(ItineraryItem::getPoi).toList();
+        List<Boolean> locked = items.stream().map(ItineraryItem::isLocked).toList();
+        RoutePlanner.OptimizationResult result = routePlanner
+                .optimizeDetailed(pois, mode, trip.getDayStartHour(), locked);
+
+        if (result.changed()) {
+            List<ItineraryItem> dirty = new ArrayList<>();
+            for (int seq = 0; seq < result.order().size(); seq++) {
+                ItineraryItem item = items.get(result.order().get(seq));
+                if (item.getSeq() != seq) {
+                    item.setSeq(seq);
+                    dirty.add(item);
+                }
+            }
+            if (!dirty.isEmpty()) {
+                itemRepository.saveAll(dirty);
+            }
+        }
+        return optimizationSummary(day, mode, result);
     }
 
     /**
@@ -313,7 +325,7 @@ public class TripService {
         Trip fresh = load(user, tripId);
         if (movedAnything) {
             for (int day = 1; day <= fresh.getNumDays(); day++) {
-                optimizeDay(user, tripId, day, null);
+                optimizeAndPersistDay(fresh, day, fresh.getDefaultMode());
             }
         }
         return detail(load(user, tripId));
@@ -322,7 +334,11 @@ public class TripService {
     // ------------------------------------------------------------------ assembling the response
 
     private TripDto detail(Trip trip) {
-        TravelMode mode = trip.getDefaultMode();
+        return detail(trip, trip.getDefaultMode(), List.of());
+    }
+
+    private TripDto detail(Trip trip, TravelMode renderMode,
+                           List<OptimizationSummaryDto> optimizationResults) {
         Map<Integer, List<ItineraryItem>> byDay = itemsByDay(trip);
         List<DayDto> days = new ArrayList<>();
         int planned = 0;
@@ -332,7 +348,8 @@ public class TripService {
             List<ItineraryItem> items = byDay.get(day);
             planned += items.size();
             List<Poi> pois = items.stream().map(ItineraryItem::getPoi).toList();
-            RoutePlanner.DayPlan plan = routePlanner.buildDay(pois, mode, trip.getDayStartHour(), dayEndHour);
+            RoutePlanner.DayPlan plan = routePlanner
+                    .buildDay(pois, renderMode, trip.getDayStartHour(), dayEndHour);
 
             List<ItemDto> itemDtos = new ArrayList<>();
             for (int i = 0; i < items.size(); i++) {
@@ -362,7 +379,24 @@ public class TripService {
                         city.getLat(), city.getLng(), city.getDefaultZoom(), city.getHeroEmoji(),
                         poiRepository.countByCityId(city.getId())),
                 String.valueOf(trip.getStartDate()), trip.getNumDays(), trip.getDayStartHour(),
-                trip.getDefaultMode().name(), days, suggestions(trip, days), planned);
+                trip.getDefaultMode().name(), days, suggestions(trip, days), planned,
+                optimizationResults);
+    }
+
+    private static OptimizationSummaryDto optimizationSummary(
+            int day, TravelMode mode, RoutePlanner.OptimizationResult result) {
+        RoutePlanner.RouteObjective before = result.before();
+        RoutePlanner.RouteObjective after = result.after();
+        RoutePlanner.OptimizationMetrics metrics = result.metrics();
+        return new OptimizationSummaryDto(day, mode.name(), result.algorithm().name(),
+                result.optimal(), result.changed(),
+                new OptimizationObjectiveDto(before.closedMinutes(), before.finishMinutes(),
+                        before.travelMinutes()),
+                new OptimizationObjectiveDto(after.closedMinutes(), after.finishMinutes(),
+                        after.travelMinutes()),
+                new OptimizationMetricsDto(metrics.movableStops(), metrics.algorithmNanos(),
+                        metrics.generatedLabels(), metrics.acceptedLabels(), metrics.prunedLabels(),
+                        metrics.maxFrontierSize(), metrics.peakFrontierLabelsInLayer()));
     }
 
     /**

@@ -87,9 +87,9 @@ class RoutePlannerTest {
         assertEquals(List.of(), violations, "planner scheduled a stop past closing time");
     }
 
-    /** Optimizing must never make the route worse than the order the user typed in. */
+    /** Optimizing must never regress the documented closed/finish/travel objective. */
     @Test
-    void neverIncreasesTravelTime() {
+    void neverRegressesTheDocumentedLexicographicObjective() {
         List<Poi> pois = List.of(
                 poi("Ghibli", 35.6962, 139.5704, 120, 10, 18),
                 poi("Senso-ji", 35.7148, 139.7967, 60, 6, 17),
@@ -98,13 +98,17 @@ class RoutePlannerTest {
                 poi("Meiji", 35.6764, 139.6993, 60, 5, 18),
                 poi("Skytree", 35.7101, 139.8107, 90, 9, 21));
 
-        int before = planner.buildDay(pois, TravelMode.TRANSIT, 9, 21).travelMinutes();
-        List<Poi> ordered = planner.optimizeOrder(pois, TravelMode.TRANSIT, 9, false).stream()
-                .map(pois::get)
-                .toList();
-        int after = planner.buildDay(ordered, TravelMode.TRANSIT, 9, 21).travelMinutes();
+        RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
+                pois, TravelMode.TRANSIT, 9, Collections.nCopies(pois.size(), false));
+        RoutePlanner.RouteObjective before = result.before();
+        RoutePlanner.RouteObjective after = result.after();
+        boolean noWorse = after.closedMinutes() < before.closedMinutes()
+                || (after.closedMinutes() == before.closedMinutes()
+                && (after.finishMinutes() < before.finishMinutes()
+                || (after.finishMinutes() == before.finishMinutes()
+                && after.travelMinutes() <= before.travelMinutes())));
 
-        assertTrue(after <= before, "travel time went up: " + before + " -> " + after);
+        assertTrue(noWorse, "objective regressed: " + before + " -> " + after);
     }
 
     @Test

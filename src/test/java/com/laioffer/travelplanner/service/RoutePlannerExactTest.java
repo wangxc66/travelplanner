@@ -5,11 +5,15 @@ import com.laioffer.travelplanner.entity.Poi;
 import com.laioffer.travelplanner.entity.TravelMode;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -38,6 +42,39 @@ class RoutePlannerExactTest {
     }
 
     @Test
+    void reportsWeekFourResultMetadataAndExcludesProviderTime() {
+        List<Poi> pois = List.of(
+                poi("Late", 60, 18, 24),
+                poi("Early", 60, 9, 10));
+        int[][] cost = {
+                {0, 10},
+                {10, 0}
+        };
+        MatrixRouteProvider provider = new MatrixRouteProvider(cost);
+        long[] ticks = {1_000L, 1_250L};
+        AtomicInteger tick = new AtomicInteger();
+        RoutePlanner planner = new RoutePlanner(provider, () -> ticks[tick.getAndIncrement()]);
+
+        RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
+                pois, TravelMode.WALK, DAY_START_HOUR, List.of(false, false));
+
+        assertEquals(List.of(1, 0), result.order());
+        assertEquals(RoutePlanner.Algorithm.HELD_KARP, result.algorithm());
+        assertTrue(result.optimal());
+        assertTrue(result.changed());
+        assertEquals(new RoutePlanner.RouteObjective(60, 1210, 10), result.before());
+        assertEquals(new RoutePlanner.RouteObjective(0, 1140, 10), result.after());
+        assertEquals(250L, result.metrics().algorithmNanos());
+        assertEquals(2, result.metrics().movableStops());
+        assertTrue(result.metrics().generatedLabels() >= result.metrics().acceptedLabels());
+        assertTrue(result.metrics().acceptedLabels() > 0);
+        assertTrue(result.metrics().maxFrontierSize() >= 1);
+        assertTrue(result.metrics().peakFrontierLabelsInLayer() >= 1);
+        assertEquals(1, provider.matrixCalls,
+                "before/after objectives must reuse the solver's one matrix snapshot");
+    }
+
+    @Test
     void keepsParetoLabelsNeededForTheGlobalTimeWindowOptimum() {
         List<Poi> pois = List.of(
                 poi("A", 90, 9, 12),
@@ -56,12 +93,60 @@ class RoutePlannerExactTest {
         RoutePlanner planner = new RoutePlanner(new MatrixRouteProvider(cost));
 
         List<Integer> expected = bruteForceBest(pois, cost, locked);
-        List<Integer> actual = planner.optimizeOrder(
+        RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
                 pois, TravelMode.TRANSIT, DAY_START_HOUR, locked);
+        List<Integer> actual = result.order();
 
         assertEquals(List.of(0, 4, 1, 2, 3), expected,
                 "fixture must retain the known unique optimum");
         assertEquals(expected, actual);
+        assertTrue(result.metrics().maxFrontierSize() >= 2,
+                "the Pareto counterexample must retain multiple labels in at least one state");
+    }
+
+    @Test
+    void keepsLexicographicallySmallerPrefixWhenOpeningWaitCanSynchronizeClocks() {
+        List<Poi> pois = List.of(
+                poi("A", 15, 10, 24),
+                poi("B", 15, 0, 24),
+                poi("C", 15, 0, 24),
+                poi("Late", 15, 12, 24));
+        int[][] cost = equalCostMatrix(4, 10);
+        RoutePlanner planner = new RoutePlanner(new MatrixRouteProvider(cost));
+
+        RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
+                pois, TravelMode.WALK, DAY_START_HOUR,
+                List.of(false, false, true, true));
+
+        assertEquals(List.of(0, 1, 2, 3), result.order(),
+                "equal travel prefixes synchronize at Late, so the lexicographically smaller path wins");
+        assertEquals(new RoutePlanner.RouteObjective(0, 735, 30), result.after());
+    }
+
+    @Test
+    void prefersShorterTravelWhenClosedMinutesAndFinishTimeTie() {
+        List<Poi> pois = List.of(
+                poi("Start", 15, 0, 24),
+                poi("Long-way", 15, 0, 24),
+                poi("Short-way", 15, 0, 24),
+                poi("Late", 15, 12, 24));
+        int[][] cost = equalCostMatrix(4, 100);
+        cost[0][1] = 50;
+        cost[1][2] = 50;
+        cost[2][3] = 10;
+        cost[0][2] = 10;
+        cost[2][1] = 10;
+        cost[1][3] = 10;
+        RoutePlanner planner = new RoutePlanner(new MatrixRouteProvider(cost));
+
+        RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
+                pois, TravelMode.TRANSIT, DAY_START_HOUR,
+                List.of(true, false, false, true));
+
+        assertEquals(new RoutePlanner.RouteObjective(0, 735, 110), result.before());
+        assertEquals(new RoutePlanner.RouteObjective(0, 735, 30), result.after());
+        assertEquals(List.of(0, 2, 1, 3), result.order(),
+                "when closing impact and finish tie, the route with less travel must win");
     }
 
     @Test
@@ -139,6 +224,80 @@ class RoutePlannerExactTest {
     void usesExactSolverThroughTwelveMovableStops() {
         assertEquals(RoutePlanner.Algorithm.HELD_KARP, RoutePlanner.algorithmFor(12));
         assertEquals(RoutePlanner.Algorithm.GREEDY_TWO_OPT, RoutePlanner.algorithmFor(13));
+    }
+
+    @Test
+    void runsDeterministicHeuristicForThirteenMovableStops() {
+        int size = 13;
+        List<Poi> pois = new ArrayList<>();
+        for (int i = 0; i < size; i++) {
+            pois.add(poi("P" + i, 15, 0, 24));
+        }
+        int[][] cost = equalCostMatrix(size, 100);
+        cost[0][12] = 1;
+        for (int from = 12; from >= 2; from--) {
+            cost[from][from - 1] = 1;
+        }
+        List<Integer> expected = List.of(0, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1);
+        List<Boolean> unlocked = Collections.nCopies(size, false);
+        RoutePlanner planner = new RoutePlanner(new MatrixRouteProvider(cost));
+
+        RoutePlanner.OptimizationResult first = planner.optimizeDetailed(
+                pois, TravelMode.DRIVE, DAY_START_HOUR, unlocked);
+        RoutePlanner.OptimizationResult second = planner.optimizeDetailed(
+                pois, TravelMode.DRIVE, DAY_START_HOUR, unlocked);
+
+        assertEquals(expected, first.order());
+        assertEquals(expected, second.order());
+        assertEquals(RoutePlanner.Algorithm.GREEDY_TWO_OPT, first.algorithm());
+        assertFalse(first.optimal());
+        assertTrue(first.changed());
+        assertEquals(new RoutePlanner.RouteObjective(0, 1935, 1200), first.before());
+        assertEquals(new RoutePlanner.RouteObjective(0, 747, 12), first.after());
+        assertEquals(first.before(), second.before());
+        assertEquals(first.after(), second.after());
+        assertEquals(13, first.metrics().movableStops());
+        assertEquals(0, first.metrics().generatedLabels());
+    }
+
+    @Test
+    void usesExactSolverForThirteenTotalStopsWhenOneIsLocked() {
+        int size = 13;
+        List<Poi> pois = new ArrayList<>();
+        for (int i = 0; i < size; i++) {
+            pois.add(poi("P" + i, 15, 0, 24));
+        }
+        List<Boolean> locked = new ArrayList<>(Collections.nCopies(size, false));
+        locked.set(6, true);
+        RoutePlanner planner = new RoutePlanner(new MatrixRouteProvider(equalCostMatrix(size, 10)));
+
+        RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
+                pois, TravelMode.TRANSIT, DAY_START_HOUR, locked);
+
+        assertEquals(RoutePlanner.Algorithm.HELD_KARP, result.algorithm());
+        assertTrue(result.optimal());
+        assertEquals(12, result.metrics().movableStops());
+        assertEquals(6, result.order().get(6));
+        assertEquals(java.util.stream.IntStream.range(0, size).boxed().toList(), result.order());
+    }
+
+    @Test
+    void reportsFixedOrderWhenOnlyOneStopCanMove() {
+        List<Poi> pois = List.of(
+                poi("Locked-A", 30, 0, 24),
+                poi("Movable", 30, 0, 24),
+                poi("Locked-C", 30, 0, 24));
+        RoutePlanner planner = new RoutePlanner(new MatrixRouteProvider(equalCostMatrix(3, 10)));
+
+        RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
+                pois, TravelMode.WALK, DAY_START_HOUR, List.of(true, false, true));
+
+        assertEquals(RoutePlanner.Algorithm.FIXED_ORDER, result.algorithm());
+        assertTrue(result.optimal());
+        assertFalse(result.changed());
+        assertEquals(result.before(), result.after());
+        assertEquals(1, result.metrics().movableStops());
+        assertEquals(0, result.metrics().generatedLabels());
     }
 
     @Test
@@ -243,9 +402,12 @@ class RoutePlannerExactTest {
     private Score score(int[] order, List<Poi> pois, int[][] cost) {
         int clock = DAY_START_HOUR * 60;
         int closed = 0;
+        int travel = 0;
         for (int position = 0; position < order.length; position++) {
             if (position > 0) {
-                clock += cost[order[position - 1]][order[position]];
+                int leg = cost[order[position - 1]][order[position]];
+                clock += leg;
+                travel += leg;
             }
             Poi poi = pois.get(order[position]);
             int open = poi.isAlwaysOpen() ? 0 : poi.getOpenHour() * 60;
@@ -255,7 +417,7 @@ class RoutePlannerExactTest {
             closed += poi.isAlwaysOpen() ? 0 : Math.max(0, leave - Math.max(visitStart, close));
             clock = leave;
         }
-        return new Score(closed, clock);
+        return new Score(closed, clock, travel);
     }
 
     private int compare(Score a, int[] orderA, Score b, int[] orderB) {
@@ -266,6 +428,10 @@ class RoutePlannerExactTest {
         int end = Integer.compare(a.endMinutes(), b.endMinutes());
         if (end != 0) {
             return end;
+        }
+        int travel = Integer.compare(a.travelMinutes(), b.travelMinutes());
+        if (travel != 0) {
+            return travel;
         }
         for (int i = 0; i < orderA.length; i++) {
             int item = Integer.compare(orderA[i], orderB[i]);
@@ -286,7 +452,7 @@ class RoutePlannerExactTest {
         return matrix;
     }
 
-    private record Score(int closedMinutes, int endMinutes) {
+    private record Score(int closedMinutes, int endMinutes, int travelMinutes) {
     }
 
     private static final class Best {
@@ -297,6 +463,7 @@ class RoutePlannerExactTest {
     private static final class MatrixRouteProvider implements RouteProvider {
         private final int[][] cost;
         private int lastMatrixSize;
+        private int matrixCalls;
 
         private MatrixRouteProvider(int[][] cost) {
             this.cost = cost;
@@ -305,6 +472,7 @@ class RoutePlannerExactTest {
         @Override
         public int[][] matrix(List<Poi> pois, TravelMode mode) {
             lastMatrixSize = pois.size();
+            matrixCalls++;
             return cost;
         }
 

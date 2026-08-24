@@ -13,7 +13,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Fixed-matrix smoke benchmark for the Week 3 exact-algorithm latency SLO. */
+/** Fixed-matrix benchmark matrix for the Week 4 exact-algorithm latency SLO. */
 class RoutePlannerSloTest {
 
     private static final int STOP_COUNT = 12;
@@ -36,28 +36,81 @@ class RoutePlannerSloTest {
         List<Boolean> unlocked = Collections.nCopies(STOP_COUNT, false);
 
         // Warm the JIT; network/provider latency is deliberately absent from this benchmark.
-        List<Integer> expected = planner.optimizeOrder(
+        RoutePlanner.OptimizationResult baseline = planner.optimizeDetailed(
                 pois, TravelMode.TRANSIT, 9, unlocked);
-        planner.optimizeOrder(pois, TravelMode.TRANSIT, 9, unlocked);
+        List<Integer> expected = baseline.order();
+        planner.optimizeDetailed(pois, TravelMode.TRANSIT, 9, unlocked);
 
         long[] elapsedNanos = new long[SAMPLES];
+        long maxGenerated = 0;
+        long maxAccepted = 0;
+        long maxPeakLayerLabels = 0;
+        int maxFrontier = 0;
         for (int sample = 0; sample < SAMPLES; sample++) {
-            long started = System.nanoTime();
-            List<Integer> actual = planner.optimizeOrder(
+            RoutePlanner.OptimizationResult result = planner.optimizeDetailed(
                     pois, TravelMode.TRANSIT, 9, unlocked);
-            elapsedNanos[sample] = System.nanoTime() - started;
-            assertEquals(expected, actual, "benchmark result must remain deterministic");
+            elapsedNanos[sample] = result.metrics().algorithmNanos();
+            maxGenerated = Math.max(maxGenerated, result.metrics().generatedLabels());
+            maxAccepted = Math.max(maxAccepted, result.metrics().acceptedLabels());
+            maxPeakLayerLabels = Math.max(
+                    maxPeakLayerLabels, result.metrics().peakFrontierLabelsInLayer());
+            maxFrontier = Math.max(maxFrontier, result.metrics().maxFrontierSize());
+            assertEquals(expected, result.order(), "benchmark result must remain deterministic");
+            assertEquals(RoutePlanner.Algorithm.HELD_KARP, result.algorithm());
+            assertTrue(result.optimal());
         }
 
         Arrays.sort(elapsedNanos);
+        long p50Nanos = elapsedNanos[(int) Math.ceil(SAMPLES * 0.50) - 1];
         long p95Nanos = elapsedNanos[(int) Math.ceil(SAMPLES * 0.95) - 1];
+        double p50Millis = p50Nanos / 1_000_000.0;
         double p95Millis = p95Nanos / 1_000_000.0;
-        System.out.printf("exact-12 fixed-matrix P95: %.1f ms (%d samples)%n", p95Millis, SAMPLES);
+        System.out.printf("exact-12 fixed-matrix P50/P95: %.1f/%.1f ms (%d samples); "
+                        + "labels generated/accepted=%d/%d, max state labels=%d, peak layer labels=%d%n",
+                p50Millis, p95Millis, SAMPLES,
+                maxGenerated, maxAccepted, maxFrontier, maxPeakLayerLabels);
+        assertTrue(p50Nanos <= p95Nanos);
         assertTrue(p95Nanos <= 500_000_000L,
                 () -> "fixed-matrix exact P95 was %.1f ms (SLO: <= 500 ms)".formatted(p95Millis));
+        assertTrue(maxGenerated >= maxAccepted && maxAccepted > 0);
+        assertTrue(maxFrontier >= 1);
+        assertTrue(maxPeakLayerLabels >= 1);
 
         assertEquals(STOP_COUNT, expected.size());
         assertEquals(STOP_COUNT, expected.stream().distinct().count());
+    }
+
+    @Test
+    void reportsSmallAndMediumExactScalingFixtures() {
+        for (int stopCount : List.of(4, 8)) {
+            City city = new City("Benchmark", "Test", "UTC", 0, 0, 12, "*");
+            List<Poi> pois = new ArrayList<>();
+            for (int i = 0; i < stopCount; i++) {
+                pois.add(new Poi(city, "P" + i, "Landmark", 0, 0, 4.5,
+                        30 + (i % 3) * 15, 8 + i % 4, 14 + i % 7, "benchmark"));
+            }
+            RoutePlanner planner = new RoutePlanner(new FixedMatrixProvider(deterministicMatrix(stopCount)));
+            List<Boolean> unlocked = Collections.nCopies(stopCount, false);
+
+            planner.optimizeDetailed(pois, TravelMode.TRANSIT, 9, unlocked);
+            long[] samples = new long[10];
+            RoutePlanner.OptimizationResult last = null;
+            for (int sample = 0; sample < samples.length; sample++) {
+                last = planner.optimizeDetailed(pois, TravelMode.TRANSIT, 9, unlocked);
+                samples[sample] = last.metrics().algorithmNanos();
+            }
+            Arrays.sort(samples);
+            double p50Millis = samples[4] / 1_000_000.0;
+            double p95Millis = samples[9] / 1_000_000.0;
+            System.out.printf("exact-%d fixed-matrix P50/P95: %.1f/%.1f ms; "
+                            + "labels generated/accepted=%d/%d, max state labels=%d, peak layer labels=%d%n",
+                    stopCount, p50Millis, p95Millis,
+                    last.metrics().generatedLabels(), last.metrics().acceptedLabels(),
+                    last.metrics().maxFrontierSize(), last.metrics().peakFrontierLabelsInLayer());
+            assertEquals(RoutePlanner.Algorithm.HELD_KARP, last.algorithm());
+            assertTrue(last.optimal());
+            assertTrue(samples[9] <= 500_000_000L);
+        }
     }
 
     private static int[][] deterministicMatrix(int size) {
