@@ -4,6 +4,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.validation.FieldError;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -23,13 +24,12 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, Object>> handleValidation(MethodArgumentNotValidException e) {
-        String message = e.getBindingResult().getFieldErrors().stream()
-                .findFirst()
-                .map(f -> f.getField() + " " + f.getDefaultMessage())
-                .orElse("Invalid request");
+        FieldError field = e.getBindingResult().getFieldErrors().stream().findFirst().orElse(null);
+        String code = validationCode(field);
+        String message = validationMessage(field);
         return ResponseEntity.badRequest().body(Map.of(
                 "message", message,
-                "code", "error.invalidRequest",
+                "code", code,
                 "params", Map.of()));
     }
 
@@ -43,6 +43,30 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<Map<String, Object>> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
         return invalidRequest("Invalid value for " + e.getName());
+    }
+
+    private static String validationCode(FieldError field) {
+        if (field == null) {
+            return "error.invalidRequest";
+        }
+        return switch (field.getField()) {
+            case "username" -> "error.usernameRules";
+            case "password" -> "error.passwordRules";
+            case "displayName" -> "error.displayNameRules";
+            default -> "error.invalidRequest";
+        };
+    }
+
+    private static String validationMessage(FieldError field) {
+        return switch (validationCode(field)) {
+            case "error.usernameRules" ->
+                    "Username must be 3–64 letters, numbers, dots, dashes, or underscores";
+            case "error.passwordRules" ->
+                    "Password must be at least 12 characters and at most 72 UTF-8 bytes";
+            case "error.displayNameRules" -> "Display name must be 100 characters or fewer";
+            default -> field == null ? "Invalid request"
+                    : field.getField() + " " + field.getDefaultMessage();
+        };
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

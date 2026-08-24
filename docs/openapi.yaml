@@ -74,22 +74,27 @@ paths:
               schema:
                 $ref: '#/components/schemas/AuthResponse'
         '400':
-          description: Required fields are missing or the credentials are invalid.
+          description: Required fields are missing or invalid.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
               examples:
-                invalidRequest:
+                usernameRules:
                   value:
-                    message: username must not be blank
-                    code: error.invalidRequest
+                    message: Username must be 3–64 letters, numbers, dots, dashes, or underscores
+                    code: error.usernameRules
                     params: {}
-                badCredentials:
-                  value:
-                    message: Wrong username or password
-                    code: error.badCredentials
-                    params: {}
+        '401':
+          description: The supplied username or password is incorrect.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                message: Wrong username or password
+                code: error.badCredentials
+                params: {}
   /api/cities:
     get:
       tags: [Catalog]
@@ -576,6 +581,10 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ApiError'
+          example:
+            message: Access denied
+            code: error.accessDenied
+            params: {}
     CityNotFound:
       description: The requested city does not exist.
       content:
@@ -618,13 +627,17 @@ components:
       properties:
         username:
           type: string
-          minLength: 1
+          minLength: 3
+          maxLength: 64
+          pattern: '^[A-Za-z0-9._-]+$'
         password:
           type: string
-          minLength: 1
+          minLength: 12
+          maxLength: 72
           format: password
         displayName:
           type: string
+          maxLength: 100
           nullable: true
     LoginRequest:
       type: object
@@ -744,6 +757,8 @@ components:
           nullable: true
         dayStartHour:
           type: integer
+          minimum: 5
+          maximum: 14
           nullable: true
         defaultMode:
           $ref: '#/components/schemas/TravelMode'
@@ -766,6 +781,7 @@ components:
           minimum: 1
         seq:
           type: integer
+          minimum: 0
           nullable: true
           description: Target sequence position; omit to append using the service default.
     ReorderRequest:

@@ -28,12 +28,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -80,8 +83,8 @@ class TripServiceOptimizeDayTest {
         service = new TripService(tripRepository, itemRepository, cityRepository, poiRepository,
                 routePlanner, DAY_START_HOUR, DAY_END_HOUR);
 
-        when(tripRepository.findByIdAndUserId(TRIP_ID, USER_ID)).thenReturn(Optional.of(trip));
-        when(routePlanner.buildDay(anyList(), any(TravelMode.class), anyInt(), anyInt()))
+        when(tripRepository.findOwnedForUpdate(TRIP_ID, USER_ID)).thenReturn(Optional.of(trip));
+        lenient().when(routePlanner.buildDay(anyList(), any(TravelMode.class), anyInt(), anyInt()))
                 .thenAnswer(invocation -> emptyDayPlan(
                         invocation.<List<Poi>>getArgument(0).size(),
                         invocation.getArgument(2)));
@@ -157,6 +160,21 @@ class TripServiceOptimizeDayTest {
         assertSequentialSeq(saved);
     }
 
+    @Test
+    void rejectsAnInvalidOptimizerPermutationBeforeAnyWrite() {
+        List<ItineraryItem> original = List.of(
+                item("A", 0, false), item("B", 1, false), item("C", 2, false));
+        stubItems(original);
+        when(routePlanner.optimizeOrder(anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
+                .thenReturn(List.of(0, 0, 2));
+
+        assertThrows(IllegalStateException.class,
+                () -> service.optimizeDay(user, TRIP_ID, DAY_INDEX, null));
+
+        verify(itemRepository, never()).saveAll(anyList());
+        verify(itemRepository, never()).flush();
+    }
+
     private ItineraryItem item(String name, int seq, boolean locked) {
         Poi poi = new Poi(city, name, "Landmark", 0, 0, 4.5,
                 30, 0, 24, name);
@@ -168,7 +186,7 @@ class TripServiceOptimizeDayTest {
     private void stubItems(List<ItineraryItem> items) {
         when(itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(TRIP_ID, DAY_INDEX))
                 .thenReturn(items);
-        when(itemRepository.findByTripIdOrderByDayIndexAscSeqAsc(TRIP_ID))
+        lenient().when(itemRepository.findByTripIdOrderByDayIndexAscSeqAsc(TRIP_ID))
                 .thenAnswer(ignored -> items.stream()
                         .sorted(Comparator.comparingInt(ItineraryItem::getSeq))
                         .toList());
@@ -177,9 +195,9 @@ class TripServiceOptimizeDayTest {
     @SuppressWarnings("unchecked")
     private List<ItineraryItem> captureSavedItems() {
         ArgumentCaptor<Iterable<ItineraryItem>> captor = ArgumentCaptor.forClass(Iterable.class);
-        verify(itemRepository).saveAll(captor.capture());
+        verify(itemRepository, times(2)).saveAll(captor.capture());
         List<ItineraryItem> saved = new ArrayList<>();
-        captor.getValue().forEach(saved::add);
+        captor.getAllValues().getLast().forEach(saved::add);
         return saved;
     }
 

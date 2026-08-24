@@ -51,7 +51,7 @@ public class TripController {
     }
 
     @PatchMapping("/{tripId}")
-    public TripDto update(@PathVariable Long tripId, @RequestBody UpdateTripRequest request) {
+    public TripDto update(@PathVariable Long tripId, @Valid @RequestBody UpdateTripRequest request) {
         return tripService.update(authService.currentUser(), tripId, request);
     }
 

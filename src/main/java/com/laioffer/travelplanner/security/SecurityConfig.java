@@ -1,11 +1,11 @@
 package com.laioffer.travelplanner.security;
 
 import com.laioffer.travelplanner.repository.UserRepository;
-import jakarta.servlet.http.HttpServletResponse;
+import com.laioffer.travelplanner.web.CorrelationIdFilter;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -22,18 +22,10 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import java.util.List;
-import java.util.Map;
-import tools.jackson.databind.ObjectMapper;
 
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
-
-    private final ObjectMapper objectMapper;
-
-    public SecurityConfig(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
-    }
 
     @Bean
     public UserDetailsService userDetailsService(UserRepository userRepository) {
@@ -47,51 +39,83 @@ public class SecurityConfig {
 
     @Bean
     public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
+        return new BCryptPasswordEncoder(12);
     }
 
     @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthFilter jwtAuthFilter) throws Exception {
+    public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthFilter jwtAuthFilter,
+                                           AuthRateLimitFilter rateLimitFilter,
+                                           CorrelationIdFilter correlationIdFilter,
+                                           CorsConfigurationSource corsConfigurationSource) throws Exception {
         http
-                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                .cors(cors -> cors.configurationSource(corsConfigurationSource))
                 .csrf(csrf -> csrf.disable())
-                .headers(headers -> headers.frameOptions(frame -> frame.disable()))
+                .headers(headers -> headers.frameOptions(frame -> frame.sameOrigin()))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .exceptionHandling(errors -> errors
-                        .authenticationEntryPoint((request, response, exception) ->
-                                writeError(response, HttpStatus.UNAUTHORIZED,
-                                        "error.signInRequired", "Please sign in"))
-                        .accessDeniedHandler((request, response, exception) ->
-                                writeError(response, HttpStatus.FORBIDDEN,
-                                        "error.forbidden", "You are not allowed to perform this action")))
+                        .authenticationEntryPoint((request, response, exception) -> {
+                            response.setStatus(401);
+                            response.setContentType("application/json");
+                            response.getWriter().write("{\"message\":\"Please sign in\","
+                                    + "\"code\":\"error.signInRequired\",\"params\":{}}");
+                        })
+                        .accessDeniedHandler((request, response, exception) -> {
+                            response.setStatus(403);
+                            response.setContentType("application/json");
+                            response.getWriter().write("{\"message\":\"Access denied\","
+                                    + "\"code\":\"error.accessDenied\",\"params\":{}}");
+                        }))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/auth/**", "/h2-console/**", "/actuator/**").permitAll()
+                        .requestMatchers("/auth/**", "/h2-console/**", "/actuator/health").permitAll()
                         // Browsing the POI catalog needs no account — lowers the barrier to a first plan.
                         .requestMatchers(HttpMethod.GET, "/api/cities/**", "/api/categories/**").permitAll()
                         .anyRequest().authenticated())
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(correlationIdFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(rateLimitFilter, CorrelationIdFilter.class)
+                .addFilterAfter(jwtAuthFilter, AuthRateLimitFilter.class)
+                ;
         return http.build();
     }
 
     @Bean
-    public CorsConfigurationSource corsConfigurationSource() {
+    public FilterRegistrationBean<CorrelationIdFilter> correlationRegistration(CorrelationIdFilter filter) {
+        return disabledRegistration(filter);
+    }
+
+    @Bean
+    public FilterRegistrationBean<AuthRateLimitFilter> rateLimitRegistration(AuthRateLimitFilter filter) {
+        return disabledRegistration(filter);
+    }
+
+    @Bean
+    public FilterRegistrationBean<JwtAuthFilter> jwtRegistration(JwtAuthFilter filter) {
+        return disabledRegistration(filter);
+    }
+
+    private static <T extends jakarta.servlet.Filter> FilterRegistrationBean<T> disabledRegistration(T filter) {
+        FilterRegistrationBean<T> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource(
+            @Value("${travelplanner.security.cors.allowed-origins:http://localhost:3000,http://127.0.0.1:3000}") String origins) {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOriginPatterns(List.of("http://localhost:*", "http://127.0.0.1:*"));
+        List<String> allowedOrigins = java.util.Arrays.stream(origins.split(","))
+                .map(String::trim).filter(value -> !value.isEmpty()).toList();
+        if (allowedOrigins.isEmpty() || allowedOrigins.stream().anyMatch(value -> value.contains("*"))) {
+            throw new IllegalStateException("CORS requires at least one exact origin and forbids wildcards");
+        }
+        config.setAllowedOrigins(allowedOrigins);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("*"));
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Correlation-ID"));
+        config.setExposedHeaders(List.of("X-Correlation-ID"));
+        config.setAllowCredentials(false);
+        config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
         return source;
     }
 
-    /** Keep Spring Security failures on the same semantic error contract as controller failures. */
-    private void writeError(HttpServletResponse response, HttpStatus status, String code, String message)
-            throws java.io.IOException {
-        response.setStatus(status.value());
-        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-        objectMapper.writeValue(response.getOutputStream(), Map.of(
-                "message", message,
-                "code", code,
-                "params", Map.of()));
-    }
 }

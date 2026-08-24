@@ -38,7 +38,18 @@ class ApiErrorContractTest {
                         .content("{}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.code").value("error.invalidRequest"))
+                .andExpect(jsonPath("$.code").value("error.usernameRules"))
+                .andExpect(jsonPath("$.params").isMap());
+    }
+
+    @Test
+    void invalidCredentialsUseTheDocumentedUnauthorizedError() throws Exception {
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"unknown-user\",\"password\":\"ValidPassword123\"}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.code").value("error.badCredentials"))
                 .andExpect(jsonPath("$.params").isMap());
     }
 }

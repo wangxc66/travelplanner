@@ -8,9 +8,17 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
 
 /** A point of interest, searchable from our own database (no Places API call needed). */
 @Entity
+@Table(name = "poi")
 public class Poi {
 
     @Id
@@ -18,27 +26,47 @@ public class Poi {
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "city_id")
+    @JoinColumn(name = "city_id", nullable = false,
+            foreignKey = @jakarta.persistence.ForeignKey(name = "fk_poi_city"))
     private City city;
 
     @Column(nullable = false)
+    @NotBlank
     private String name;
 
     @Column(nullable = false)
+    @NotBlank
     private String category;
 
+    @DecimalMin("-90.0")
+    @DecimalMax("90.0")
+    @Column(nullable = false)
     private double lat;
 
+    @DecimalMin("-180.0")
+    @DecimalMax("180.0")
+    @Column(nullable = false)
     private double lng;
 
+    @DecimalMin("0.0")
+    @DecimalMax("5.0")
+    @Column(nullable = false)
     private double rating;
 
     /** Typical time a traveler spends here, drives the day timeline. */
+    @Positive
+    @Column(nullable = false)
     private int avgVisitMinutes;
 
     /** Simplified opening window in local hours, 0 and 24 meaning "always open". */
+    @Min(0)
+    @Max(24)
+    @Column(nullable = false)
     private int openHour;
 
+    @Min(0)
+    @Max(24)
+    @Column(nullable = false)
     private int closeHour;
 
     @Column(length = 400)

@@ -21,7 +21,7 @@ seeded city and POI catalog. Accounts and trips are intentionally not seeded.
    ```json
    {
      "username": "local_api_tester",
-     "password": "Test123456",
+    "password": "Test12345678",
      "displayName": "Local API Tester"
    }
    ```
@@ -63,8 +63,9 @@ Frontend code should branch on `code`, not on the English `message`.
 | Situation | HTTP status | Example code |
 | --- | --- | --- |
 | Missing or invalid JWT | `401` | `error.signInRequired` |
-| Valid user, but operation is forbidden | `403` | `error.forbidden` |
-| Invalid JSON, request body, query, or path value | `400` | `error.invalidRequest` |
+| Valid user, but operation is forbidden | `403` | `error.accessDenied` |
+| Invalid JSON, query, or path value | `400` | `error.invalidRequest` |
+| Invalid username, password, or display name | `400` | `error.usernameRules` / `error.passwordRules` / `error.displayNameRules` |
 | User cannot see the requested trip or item | `404` | `error.tripNotFound` / `error.itemNotFound` |
 | Duplicate username or POI in one trip | `409` | `error.usernameTaken` / `error.poiAlreadyPlanned` |
 
