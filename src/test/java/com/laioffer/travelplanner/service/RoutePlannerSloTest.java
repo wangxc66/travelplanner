@@ -65,7 +65,7 @@ class RoutePlannerSloTest {
         long p95Nanos = elapsedNanos[(int) Math.ceil(SAMPLES * 0.95) - 1];
         double p50Millis = p50Nanos / 1_000_000.0;
         double p95Millis = p95Nanos / 1_000_000.0;
-        System.out.printf("exact-12 fixed-matrix P50/P95: %.1f/%.1f ms (%d samples); "
+        System.out.printf("PERF exact-12 fixed-matrix p50=%.1fms p95=%.1fms samples=%d; "
                         + "labels generated/accepted=%d/%d, max state labels=%d, peak layer labels=%d%n",
                 p50Millis, p95Millis, SAMPLES,
                 maxGenerated, maxAccepted, maxFrontier, maxPeakLayerLabels);
@@ -111,6 +111,35 @@ class RoutePlannerSloTest {
             assertTrue(last.optimal());
             assertTrue(samples[9] <= 500_000_000L);
         }
+    }
+
+    @Test
+    void heuristicTwentyFiveStopP95StaysWithinOneHundredMilliseconds() {
+        int stopCount = 25;
+        City city = new City("Benchmark", "Test", "UTC", 0, 0, 12, "*");
+        List<Poi> pois = new ArrayList<>();
+        for (int i = 0; i < stopCount; i++) {
+            pois.add(new Poi(city, "P" + i, "Landmark", 0, 0, 4.5,
+                    30 + (i % 3) * 15, 8 + i % 4, 16 + i % 7, "benchmark"));
+        }
+        RoutePlanner planner = new RoutePlanner(new FixedMatrixProvider(deterministicMatrix(stopCount)));
+        List<Boolean> unlocked = Collections.nCopies(stopCount, false);
+        List<Integer> expected = planner.optimizeOrder(pois, TravelMode.TRANSIT, 9, unlocked);
+        planner.optimizeOrder(pois, TravelMode.TRANSIT, 9, unlocked);
+
+        long[] elapsedNanos = new long[50];
+        for (int sample = 0; sample < elapsedNanos.length; sample++) {
+            long started = System.nanoTime();
+            assertEquals(expected, planner.optimizeOrder(pois, TravelMode.TRANSIT, 9, unlocked));
+            elapsedNanos[sample] = System.nanoTime() - started;
+        }
+        Arrays.sort(elapsedNanos);
+        double p50Millis = elapsedNanos[24] / 1_000_000.0;
+        double p95Millis = elapsedNanos[47] / 1_000_000.0;
+        System.out.printf("PERF heuristic-25 fixed-matrix p50=%.1fms p95=%.1fms samples=%d%n",
+                p50Millis, p95Millis, elapsedNanos.length);
+        assertTrue(elapsedNanos[47] <= 100_000_000L,
+                () -> "heuristic-25 fixed-matrix p95 was %.1f ms (SLO: <= 100 ms)".formatted(p95Millis));
     }
 
     private static int[][] deterministicMatrix(int size) {

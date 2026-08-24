@@ -6,9 +6,9 @@ import com.laioffer.travelplanner.dto.Dtos.DayDto;
 import com.laioffer.travelplanner.dto.Dtos.ItemDto;
 import com.laioffer.travelplanner.dto.Dtos.MoveItemRequest;
 import com.laioffer.travelplanner.dto.Dtos.NoticeDto;
+import com.laioffer.travelplanner.dto.Dtos.OptimizationSummaryDto;
 import com.laioffer.travelplanner.dto.Dtos.OptimizationMetricsDto;
 import com.laioffer.travelplanner.dto.Dtos.OptimizationObjectiveDto;
-import com.laioffer.travelplanner.dto.Dtos.OptimizationSummaryDto;
 import com.laioffer.travelplanner.dto.Dtos.SuggestionDto;
 import com.laioffer.travelplanner.dto.Dtos.TripDto;
 import com.laioffer.travelplanner.dto.Dtos.TripSummaryDto;
@@ -31,6 +31,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -39,6 +40,7 @@ import java.util.Map;
 public class TripService {
 
     private static final int MAX_DAYS = 15;
+    private static final int TEMP_SEQUENCE_BASE = 1_000_000_000;
 
     private final TripRepository tripRepository;
     private final ItineraryItemRepository itemRepository;
@@ -82,10 +84,10 @@ public class TripService {
 
     @Transactional(readOnly = true)
     public List<TripSummaryDto> list(UserEntity user) {
-        return tripRepository.findByUserIdOrderByIdDesc(user.getId()).stream()
-                .map(t -> new TripSummaryDto(t.getId(), t.getTitle(), t.getCity().getName(),
-                        t.getCity().getHeroEmoji(), String.valueOf(t.getStartDate()), t.getNumDays(),
-                        itemRepository.findByTripIdOrderByDayIndexAscSeqAsc(t.getId()).size()))
+        return tripRepository.findSummariesByUserId(user.getId()).stream()
+                .map(t -> new TripSummaryDto(t.getId(), t.getTitle(), t.getCityName(),
+                        t.getHeroEmoji(), String.valueOf(t.getStartDate()), t.getNumDays(),
+                        Math.toIntExact(t.getItemCount())))
                 .toList();
     }
 
@@ -96,7 +98,7 @@ public class TripService {
 
     @Transactional
     public TripDto update(UserEntity user, Long tripId, UpdateTripRequest request) {
-        Trip trip = load(user, tripId);
+        Trip trip = loadForUpdate(user, tripId);
         if (request.title() != null && !request.title().isBlank()) {
             trip.setTitle(request.title().trim());
         }
@@ -104,10 +106,14 @@ public class TripService {
             trip.setStartDate(request.startDate());
         }
         if (request.dayStartHour() != null) {
-            trip.setDayStartHour(Math.clamp(request.dayStartHour(), 5, 14));
+            if (request.dayStartHour() < 5 || request.dayStartHour() > 14) {
+                throw ApiException.badRequest("error.dayStartHourRange",
+                        "Day start hour must be between 5 and 14", "min", 5, "max", 14);
+            }
+            trip.setDayStartHour(request.dayStartHour());
         }
         if (request.defaultMode() != null) {
-            trip.setDefaultMode(TravelMode.valueOf(request.defaultMode().toUpperCase(Locale.ROOT)));
+            trip.setDefaultMode(parseMode(request.defaultMode()));
         }
         if (request.numDays() != null) {
             int days = request.numDays();
@@ -116,15 +122,16 @@ public class TripService {
             }
             if (days < trip.getNumDays()) {
                 // Shrinking the trip must not silently drop stops: fold them into the last day.
-                List<ItineraryItem> orphans = itemRepository.findByTripIdOrderByDayIndexAscSeqAsc(tripId).stream()
-                        .filter(i -> i.getDayIndex() > days)
+                // Include the retained day's existing items in the two-phase rewrite. Assigning
+                // orphan sequence numbers directly can collide with rows from another removed day
+                // before Hibernate has flushed every update.
+                List<ItineraryItem> folded = itemRepository.findByTripIdOrderByDayIndexAscSeqAsc(tripId).stream()
+                        .filter(i -> i.getDayIndex() >= days)
                         .toList();
-                int seq = itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(tripId, days).size();
-                for (ItineraryItem orphan : orphans) {
-                    orphan.setDayIndex(days);
-                    orphan.setSeq(seq++);
+                for (ItineraryItem item : folded) {
+                    item.setDayIndex(days);
                 }
-                itemRepository.saveAll(orphans);
+                persistOrder(folded);
             }
             trip.setNumDays(days);
         }
@@ -134,14 +141,14 @@ public class TripService {
 
     @Transactional
     public void delete(UserEntity user, Long tripId) {
-        tripRepository.delete(load(user, tripId));
+        tripRepository.delete(loadForUpdate(user, tripId));
     }
 
     // ------------------------------------------------------------------ itinerary items
 
     @Transactional
     public TripDto addItem(UserEntity user, Long tripId, AddItemRequest request) {
-        Trip trip = load(user, tripId);
+        Trip trip = loadForUpdate(user, tripId);
         int day = requireDay(trip, request.dayIndex());
         Poi poi = poiRepository.findById(request.poiId())
                 .orElseThrow(() -> ApiException.notFound("error.poiNotFound", "POI not found"));
@@ -151,14 +158,14 @@ public class TripService {
         if (itemRepository.existsByTripIdAndPoiId(tripId, poi.getId())) {
             throw ApiException.conflict("error.poiAlreadyPlanned", poi.getName() + " is already in this trip", "name", poi.getName());
         }
-        int seq = itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(tripId, day).size();
+        int seq = Math.toIntExact(itemRepository.countByTripIdAndDayIndex(tripId, day));
         itemRepository.save(new ItineraryItem(trip, poi, day, seq));
         return detail(trip);
     }
 
     @Transactional
     public TripDto removeItem(UserEntity user, Long tripId, Long itemId) {
-        Trip trip = load(user, tripId);
+        Trip trip = loadForUpdate(user, tripId);
         ItineraryItem item = item(trip, itemId);
         int day = item.getDayIndex();
         itemRepository.delete(item);
@@ -170,51 +177,61 @@ public class TripService {
     /** Drag-and-drop inside one day: the client sends the full new order of item ids. */
     @Transactional
     public TripDto reorderDay(UserEntity user, Long tripId, int dayIndex, List<Long> itemIds) {
-        Trip trip = load(user, tripId);
+        Trip trip = loadForUpdate(user, tripId);
         int day = requireDay(trip, dayIndex);
+        if (itemIds == null) {
+            throw ApiException.badRequest("error.reorderMismatch",
+                    "Reorder must list exactly the items of day " + day, "day", day);
+        }
         Map<Long, ItineraryItem> current = new LinkedHashMap<>();
         for (ItineraryItem item : itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(tripId, day)) {
             current.put(item.getId(), item);
         }
-        if (itemIds.size() != current.size() || !current.keySet().containsAll(itemIds)) {
+        LinkedHashSet<Long> requested = new LinkedHashSet<>(itemIds);
+        if (itemIds.size() != current.size() || requested.size() != itemIds.size()
+                || !current.keySet().equals(requested)) {
             throw ApiException.badRequest("error.reorderMismatch", "Reorder must list exactly the items of day " + day, "day", day);
         }
-        int seq = 0;
+        List<ItineraryItem> ordered = new ArrayList<>(itemIds.size());
         for (Long id : itemIds) {
-            current.get(id).setSeq(seq++);
+            ordered.add(current.get(id));
         }
-        itemRepository.saveAll(current.values());
+        persistOrder(ordered);
         return detail(trip);
     }
 
     /** Drag across days, or the one-click "move to day N" from a rebalance suggestion. */
     @Transactional
     public TripDto moveItem(UserEntity user, Long tripId, Long itemId, MoveItemRequest request) {
-        Trip trip = load(user, tripId);
+        Trip trip = loadForUpdate(user, tripId);
+        moveItemInternal(trip, itemId, request.dayIndex(), request.seq());
+        return detail(trip);
+    }
+
+    private void moveItemInternal(Trip trip, Long itemId, int requestedDay, Integer requestedSeq) {
         ItineraryItem item = item(trip, itemId);
-        int targetDay = requireDay(trip, request.dayIndex());
+        int targetDay = requireDay(trip, requestedDay);
         int sourceDay = item.getDayIndex();
 
         List<ItineraryItem> target = new ArrayList<>(
-                itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(tripId, targetDay));
+                itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(trip.getId(), targetDay));
         target.remove(item);
-        int position = request.seq() == null ? target.size() : Math.clamp(request.seq(), 0, target.size());
+        if (requestedSeq != null && requestedSeq < 0) {
+            throw ApiException.badRequest("error.itemSeqRange",
+                    "Item position must not be negative", "seq", requestedSeq);
+        }
+        int position = requestedSeq == null ? target.size() : Math.min(requestedSeq, target.size());
         target.add(position, item);
         item.setDayIndex(targetDay);
-        for (int i = 0; i < target.size(); i++) {
-            target.get(i).setSeq(i);
-        }
-        itemRepository.saveAll(target);
-        itemRepository.flush();
+        persistOrder(target);
         if (sourceDay != targetDay) {
-            resequence(tripId, sourceDay);
+            resequence(trip.getId(), sourceDay);
         }
-        return detail(trip);
     }
 
     @Transactional
     public TripDto toggleLock(UserEntity user, Long tripId, Long itemId) {
-        Trip trip = load(user, tripId);
+        Trip trip = loadForUpdate(user, tripId);
         ItineraryItem item = item(trip, itemId);
         item.setLocked(!item.isLocked());
         itemRepository.save(item);
@@ -228,47 +245,80 @@ public class TripService {
      * slots but still contribute their incoming/outgoing travel, visit duration and opening window.
      */
     @Transactional
-    public TripDto optimizeDay(UserEntity user, Long tripId, int dayIndex, String modeOverride) {
-        Trip trip = load(user, tripId);
+    public TripDto optimizeDay(
+            UserEntity user,
+            Long tripId,
+            int dayIndex,
+            String modeOverride) {
+
+        Trip trip = loadForUpdate(user, tripId);
         int day = requireDay(trip, dayIndex);
         TravelMode mode = resolveMode(trip, modeOverride);
-        OptimizationSummaryDto result = optimizeAndPersistDay(trip, day, mode);
+
+        OptimizationSummaryDto result =
+                optimizeAndPersistDay(trip, day, mode);
+
         return detail(trip, mode, List.of(result));
     }
 
     @Transactional
-    public TripDto optimizeAllDays(UserEntity user, Long tripId, String modeOverride) {
-        Trip trip = load(user, tripId);
+    public TripDto optimizeAllDays(
+            UserEntity user,
+            Long tripId,
+            String modeOverride) {
+
+        Trip trip = loadForUpdate(user, tripId);
         TravelMode mode = resolveMode(trip, modeOverride);
         List<OptimizationSummaryDto> results = new ArrayList<>();
+
         for (int day = 1; day <= trip.getNumDays(); day++) {
             results.add(optimizeAndPersistDay(trip, day, mode));
         }
+
         return detail(trip, mode, results);
     }
 
+
     /** One optimizer invocation and at most one persistence write; response rendering happens later. */
-    private OptimizationSummaryDto optimizeAndPersistDay(Trip trip, int day, TravelMode mode) {
+    /**
+     * Runs one optimizer invocation. Unchanged routes avoid writes;
+     * changed routes use collision-safe two-phase resequencing.
+     */
+    private OptimizationSummaryDto optimizeAndPersistDay(
+            Trip trip,
+            int day,
+            TravelMode mode) {
+
         List<ItineraryItem> items = itemRepository
-                .findByTripIdAndDayIndexOrderBySeqAsc(trip.getId(), day);
-        List<Poi> pois = items.stream().map(ItineraryItem::getPoi).toList();
-        List<Boolean> locked = items.stream().map(ItineraryItem::isLocked).toList();
-        RoutePlanner.OptimizationResult result = routePlanner
-                .optimizeDetailed(pois, mode, trip.getDayStartHour(), locked);
+                .findByTripIdAndDayIndexOrderBySeqAsc(
+                        trip.getId(), day);
+
+        List<Poi> pois = items.stream()
+                .map(ItineraryItem::getPoi)
+                .toList();
+
+        List<Boolean> locked = items.stream()
+                .map(ItineraryItem::isLocked)
+                .toList();
+
+        RoutePlanner.OptimizationResult result =
+                routePlanner.optimizeDetailed(
+                        pois,
+                        mode,
+                        trip.getDayStartHour(),
+                        locked);
+
+        validateOptimizationOrder(result.order(), locked);
 
         if (result.changed()) {
-            List<ItineraryItem> dirty = new ArrayList<>();
-            for (int seq = 0; seq < result.order().size(); seq++) {
-                ItineraryItem item = items.get(result.order().get(seq));
-                if (item.getSeq() != seq) {
-                    item.setSeq(seq);
-                    dirty.add(item);
-                }
-            }
-            if (!dirty.isEmpty()) {
-                itemRepository.saveAll(dirty);
-            }
+            List<ItineraryItem> reordered =
+                    result.order().stream()
+                            .map(items::get)
+                            .toList();
+
+            persistOrder(reordered);
         }
+
         return optimizationSummary(day, mode, result);
     }
 
@@ -278,7 +328,7 @@ public class TripService {
      */
     @Transactional
     public TripDto rebalance(UserEntity user, Long tripId) {
-        Trip trip = load(user, tripId);
+        Trip trip = loadForUpdate(user, tripId);
         TravelMode mode = trip.getDefaultMode();
         boolean movedAnything = false;
 
@@ -318,17 +368,16 @@ public class TripService {
             if (candidate == null) {
                 break;
             }
-            moveItem(user, tripId, candidate.getId(), new MoveItemRequest(lightest, null));
+            moveItemInternal(trip, candidate.getId(), lightest, null);
             movedAnything = true;
         }
-
-        Trip fresh = load(user, tripId);
         if (movedAnything) {
-            for (int day = 1; day <= fresh.getNumDays(); day++) {
-                optimizeAndPersistDay(fresh, day, fresh.getDefaultMode());
+            for (int day = 1; day <= trip.getNumDays(); day++) {
+                optimizeAndPersistDay(trip, day, mode);
             }
         }
-        return detail(load(user, tripId));
+
+        return detail(trip);
     }
 
     // ------------------------------------------------------------------ assembling the response
@@ -467,17 +516,62 @@ public class TripService {
 
     private void resequence(Long tripId, int dayIndex) {
         List<ItineraryItem> items = itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(tripId, dayIndex);
-        for (int i = 0; i < items.size(); i++) {
-            items.get(i).setSeq(i);
+        persistOrder(items);
+    }
+
+    /**
+     * Writes an order without transient unique-key collisions. First move every row to a disjoint
+     * temporary range and flush, then assign the final contiguous 0..n-1 sequence.
+     */
+    private void persistOrder(List<ItineraryItem> ordered) {
+        if (ordered.size() >= Integer.MAX_VALUE - TEMP_SEQUENCE_BASE) {
+            throw new IllegalStateException("Itinerary is too large to resequence safely");
         }
-        itemRepository.saveAll(items);
+        for (int i = 0; i < ordered.size(); i++) {
+            ordered.get(i).setSeq(TEMP_SEQUENCE_BASE + i);
+        }
+        itemRepository.saveAll(ordered);
+        itemRepository.flush();
+
+        for (int i = 0; i < ordered.size(); i++) {
+            ordered.get(i).setSeq(i);
+        }
+        itemRepository.saveAll(ordered);
+    }
+
+    private void validateOptimizationOrder(List<Integer> order, List<Boolean> locked) {
+        if (order == null || order.size() != locked.size()) {
+            throw new IllegalStateException("Route planner returned an incomplete order");
+        }
+        LinkedHashSet<Integer> positions = new LinkedHashSet<>(order);
+        if (positions.size() != order.size()) {
+            throw new IllegalStateException("Route planner returned duplicate positions");
+        }
+        for (int position = 0; position < order.size(); position++) {
+            Integer source = order.get(position);
+            if (source == null || source < 0 || source >= order.size()) {
+                throw new IllegalStateException("Route planner returned an invalid position");
+            }
+            if (Boolean.TRUE.equals(locked.get(position)) && source != position) {
+                throw new IllegalStateException("Route planner moved locked position " + position);
+            }
+        }
     }
 
     private TravelMode resolveMode(Trip trip, String override) {
         if (override == null || override.isBlank()) {
             return trip.getDefaultMode();
         }
-        return TravelMode.valueOf(override.toUpperCase(Locale.ROOT));
+        return parseMode(override);
+    }
+
+    private TravelMode parseMode(String value) {
+        try {
+            return TravelMode.valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            throw ApiException.badRequest("error.travelModeInvalid",
+                    "Unsupported travel mode", "mode", value);
+        }
     }
 
     private Trip load(UserEntity user, Long tripId) {
@@ -485,9 +579,13 @@ public class TripService {
                 .orElseThrow(() -> ApiException.notFound("error.tripNotFound", "Trip not found"));
     }
 
+    private Trip loadForUpdate(UserEntity user, Long tripId) {
+        return tripRepository.findOwnedForUpdate(tripId, user.getId())
+                .orElseThrow(() -> ApiException.notFound("error.tripNotFound", "Trip not found"));
+    }
+
     private ItineraryItem item(Trip trip, Long itemId) {
-        return itemRepository.findById(itemId)
-                .filter(i -> i.getTrip().getId().equals(trip.getId()))
+        return itemRepository.findByIdAndTripId(itemId, trip.getId())
                 .orElseThrow(() -> ApiException.notFound("error.itemNotFound", "Item not found"));
     }
 

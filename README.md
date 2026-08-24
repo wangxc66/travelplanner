@@ -13,6 +13,8 @@ actually plans. Start with [`RoutePlanner`](src/main/java/com/laioffer/travelpla
 
 Running it start to finish, in Chinese: [USAGE.md](USAGE.md).
 Working on it with us: [CONTRIBUTING.md](CONTRIBUTING.md).
+Trip mutation, ownership, ordering, and concurrency guarantees:
+[trip domain invariants](docs/TRIP_DOMAIN_INVARIANTS.md).
 
 ## Run
 
@@ -20,9 +22,9 @@ Working on it with us: [CONTRIBUTING.md](CONTRIBUTING.md).
 ./gradlew bootRun
 ```
 
-Starts on `http://localhost:8080` against an in-memory H2 database that is created and seeded on every
-boot — no Docker, no local database needed. Seed content is the searchable catalog only: 3 cities and
-84 POIs. Accounts and trips are created through the app.
+Starts on `http://localhost:8080` against an in-memory H2 database migrated by Flyway and populated by
+the local-only `demo-seed` profile — no Docker or local database needed. Seed content is the searchable
+catalog only: 3 cities and 84 POIs. Accounts and trips are created through the app.
 
 H2 console: `http://localhost:8080/h2-console` (JDBC URL `jdbc:h2:mem:travelplanner`, user `sa`).
 
@@ -32,7 +34,8 @@ H2 console: `http://localhost:8080/h2-console` (JDBC URL `jdbc:h2:mem:travelplan
 ./gradlew bootRun --args='--spring.profiles.active=postgres'
 ```
 
-Expects `travelplanner` on `localhost:5432`. Same JPA mappings, `ddl-auto: update`.
+Expects `travelplanner` on `localhost:5432`. Flyway applies versioned migrations and Hibernate runs in
+`ddl-auto: validate` mode. See [database migrations and recovery](docs/DATABASE_MIGRATIONS.md).
 
 ## Tests
 
@@ -159,4 +162,5 @@ service/     AuthService, CatalogService, TripService
              TravelTimeEstimator     speed model for modes a router cannot time
 web/         controllers + ApiException/GlobalExceptionHandler
 config/      CacheConfig (Caffeine), RouteProviderConfig, DataSeeder
+db/migration Flyway baseline and subsequent forward migrations
 ```

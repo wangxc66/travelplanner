@@ -23,6 +23,15 @@ class RoutePlannerTest {
         return new Poi(city, name, "Landmark", lat, lng, 4.5, visitMinutes, open, close, name);
     }
 
+    private List<Integer> optimize(List<Poi> pois, TravelMode mode, int dayStartHour,
+                                   List<Integer> lockedPositions) {
+        List<Boolean> locks = new ArrayList<>();
+        for (int i = 0; i < pois.size(); i++) {
+            locks.add(lockedPositions.contains(i));
+        }
+        return planner.optimizeOrder(pois, mode, dayStartHour, locks);
+    }
+
     /** Five stops laid out along a line, handed to the planner in the worst possible order. */
     @Test
     void ordersStopsAlongALineIntoOneSweep() {
@@ -33,7 +42,7 @@ class RoutePlannerTest {
                 poi("D", 35.71, 139.81, 30, 0, 24),
                 poi("B", 35.69, 139.79, 30, 0, 24));
 
-        List<String> names = planner.optimizeOrder(pois, TravelMode.WALK, 9, false).stream()
+        List<String> names = optimize(pois, TravelMode.WALK, 9, List.of()).stream()
                 .map(i -> pois.get(i).getName())
                 .toList();
 
@@ -54,7 +63,7 @@ class RoutePlannerTest {
                 poi("Museum", 35.719, 139.777, 120, 9, 17),
                 poi("Park", 35.715, 139.774, 60, 5, 23));
 
-        List<String> names = planner.optimizeOrder(pois, TravelMode.TRANSIT, 9, false).stream()
+        List<String> names = optimize(pois, TravelMode.TRANSIT, 9, List.of()).stream()
                 .map(i -> pois.get(i).getName())
                 .toList();
 
@@ -75,7 +84,7 @@ class RoutePlannerTest {
                 poi("Tower", 35.659, 139.745, 75, 9, 22),
                 poi("Park", 35.715, 139.774, 60, 5, 23));
 
-        List<Integer> order = planner.optimizeOrder(pois, TravelMode.TRANSIT, 9, false);
+        List<Integer> order = optimize(pois, TravelMode.TRANSIT, 9, List.of());
         List<Poi> ordered = order.stream().map(pois::get).toList();
         RoutePlanner.DayPlan plan = planner.buildDay(ordered, TravelMode.TRANSIT, 9, 21);
 
@@ -119,7 +128,35 @@ class RoutePlannerTest {
                 poi("Near", 35.6910, 139.7020, 60, 0, 24),
                 poi("Mid", 35.7100, 139.7800, 60, 0, 24));
 
-        List<Integer> order = planner.optimizeOrder(pois, TravelMode.DRIVE, 9, true);
+        List<Integer> order = optimize(pois, TravelMode.DRIVE, 9, List.of(0));
         assertEquals(0, order.getFirst(), "pinned first stop moved");
+    }
+
+    @Test
+    void keepsEveryLockedStopInItsOriginalSlot() {
+        List<Poi> pois = List.of(
+                poi("Far", 35.7500, 139.8500, 60, 0, 24),
+                poi("Locked lunch", 35.6900, 139.7000, 60, 12, 14),
+                poi("Near", 35.6910, 139.7020, 60, 0, 24),
+                poi("Mid", 35.7100, 139.7800, 60, 0, 24));
+
+        List<Integer> order = optimize(pois, TravelMode.DRIVE, 9, List.of(1));
+
+        assertEquals(1, order.get(1), "locked middle stop moved");
+        assertEquals(List.of(0, 1, 2, 3), order.stream().sorted().toList(),
+                "result must contain every input position exactly once");
+    }
+
+    @Test
+    void heuristicAlsoKeepsLockedSlotsFixed() {
+        List<Poi> pois = new ArrayList<>();
+        for (int i = 0; i < 14; i++) {
+            pois.add(poi("Stop " + i, 35.68 + i * 0.002, 139.78 + i * 0.002,
+                    30, 0, 24));
+        }
+        List<Integer> result = optimize(pois, TravelMode.WALK, 9, List.of(6));
+
+        assertEquals(RoutePlanner.Algorithm.GREEDY_TWO_OPT, RoutePlanner.algorithmFor(13));
+        assertEquals(6, result.get(6));
     }
 }

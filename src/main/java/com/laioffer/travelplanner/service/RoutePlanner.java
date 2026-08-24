@@ -5,6 +5,7 @@ import com.laioffer.travelplanner.entity.Poi;
 import com.laioffer.travelplanner.entity.TravelMode;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import io.micrometer.core.annotation.Timed;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -99,6 +100,8 @@ public class RoutePlanner {
      * @param lockedPositions one flag per POI; a true value pins that POI to the same list index
      * @return indices into {@code pois}, in the recommended visiting order
      */
+    @Timed(value = "travelplanner.planner", extraTags = {"operation", "optimize"},
+            description = "Planner computation duration", histogram = true)
     public List<Integer> optimizeOrder(List<Poi> pois, TravelMode mode, int dayStartHour,
                                        List<Boolean> lockedPositions) {
         return optimizeDetailed(pois, mode, dayStartHour, lockedPositions).order();
@@ -558,6 +561,8 @@ public class RoutePlanner {
      * Walks the day in order and produces arrival/departure clock times, flagging the two things
      * that silently ruin a real trip: arriving before a place opens, and running past closing time.
      */
+    @Timed(value = "travelplanner.planner", extraTags = {"operation", "build_day"},
+            description = "Planner computation duration", histogram = true)
     public DayPlan buildDay(List<Poi> pois, TravelMode mode, int dayStartHour, int dayEndHour) {
         List<TravelLeg> legs = routes.legs(pois, mode);
         List<StopPlan> stops = new ArrayList<>();

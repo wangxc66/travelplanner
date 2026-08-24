@@ -4,6 +4,8 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import jakarta.validation.constraints.Pattern;
 
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
@@ -38,9 +40,10 @@ public final class Dtos {
     // ---------- auth ----------
 
     public record RegisterRequest(
-            @NotBlank String username,
-            @NotBlank String password,
-            String displayName) {
+            @NotBlank @Size(min = 3, max = 64)
+            @Pattern(regexp = "[A-Za-z0-9._-]+") String username,
+            @NotBlank @Size(min = 12, max = 72) String password,
+            @Size(max = 100) String displayName) {
     }
 
     public record LoginRequest(
@@ -70,22 +73,24 @@ public final class Dtos {
 
     public record CreateTripRequest(
             @NotNull Long cityId,
-            String title,
+            @Size(max = 255) String title,
             LocalDate startDate,
             @Min(1) @Max(15) int numDays) {
     }
 
-    public record UpdateTripRequest(String title, LocalDate startDate,
-                                    Integer numDays, Integer dayStartHour, String defaultMode) {
+    public record UpdateTripRequest(@Size(max = 255) String title, LocalDate startDate,
+                                    @Min(1) @Max(15) Integer numDays,
+                                    @Min(5) @Max(14) Integer dayStartHour,
+                                    String defaultMode) {
     }
 
     public record AddItemRequest(@NotNull Long poiId, @Min(1) int dayIndex) {
     }
 
-    public record ReorderRequest(@NotNull List<Long> itemIds) {
+    public record ReorderRequest(@NotNull List<@NotNull Long> itemIds) {
     }
 
-    public record MoveItemRequest(@Min(1) int dayIndex, Integer seq) {
+    public record MoveItemRequest(@Min(1) int dayIndex, @Min(0) Integer seq) {
     }
 
     /**

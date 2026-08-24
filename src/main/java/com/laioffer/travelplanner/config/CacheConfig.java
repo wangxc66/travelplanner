@@ -18,12 +18,15 @@ public class CacheConfig {
 
     public static final String POI_SEARCH = "poiSearch";
     public static final String CITIES = "cities";
+    public static final String CATEGORIES = "categories";
     public static final String TRAVEL_MATRIX = "travelMatrix";
 
     @Bean
     public CacheManager cacheManager() {
-        CaffeineCacheManager manager = new CaffeineCacheManager(POI_SEARCH, CITIES, TRAVEL_MATRIX);
+        CaffeineCacheManager manager = new CaffeineCacheManager(
+                POI_SEARCH, CITIES, CATEGORIES, TRAVEL_MATRIX);
         manager.setCaffeine(Caffeine.newBuilder()
+                .recordStats()
                 .maximumSize(5_000)
                 .expireAfterWrite(Duration.ofHours(6)));
         return manager;
