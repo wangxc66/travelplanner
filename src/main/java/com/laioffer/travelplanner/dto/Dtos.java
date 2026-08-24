@@ -118,10 +118,39 @@ public final class Dtos {
                                 Long itemId, Integer fromDay, Integer toDay) {
     }
 
+    public record OptimizationObjectiveDto(int closedMinutes, int finishMinutes, int travelMinutes) {
+    }
+
+    public record OptimizationMetricsDto(int movableStops, long algorithmNanos,
+                                         long generatedLabels, long acceptedLabels, long prunedLabels,
+                                         int maxFrontierSize, long peakFrontierLabelsInLayer) {
+    }
+
+    /** Additive metadata returned by optimize endpoints; existing trip fields remain unchanged. */
+    public record OptimizationSummaryDto(int dayIndex, String mode, String algorithm,
+                                         boolean optimal, boolean changed,
+                                         OptimizationObjectiveDto before,
+                                         OptimizationObjectiveDto after,
+                                         OptimizationMetricsDto metrics) {
+    }
+
     public record TripDto(Long id, String title, CityDto city, String startDate, int numDays,
                           int dayStartHour, String defaultMode,
                           List<DayDto> days, List<SuggestionDto> suggestions,
-                          int plannedCount) {
+                          int plannedCount,
+                          List<OptimizationSummaryDto> optimizationResults) {
+        public TripDto {
+            optimizationResults = optimizationResults == null ? List.of() : List.copyOf(optimizationResults);
+        }
+
+        /** Keeps existing Java callers source-compatible while the frontend adopts Week 4 metadata. */
+        public TripDto(Long id, String title, CityDto city, String startDate, int numDays,
+                       int dayStartHour, String defaultMode,
+                       List<DayDto> days, List<SuggestionDto> suggestions,
+                       int plannedCount) {
+            this(id, title, city, startDate, numDays, dayStartHour, defaultMode,
+                    days, suggestions, plannedCount, List.of());
+        }
     }
 
     public record TripSummaryDto(Long id, String title, String cityName, String heroEmoji,

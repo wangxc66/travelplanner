@@ -3,15 +3,18 @@ package com.laioffer.travelplanner.service;
 import com.laioffer.travelplanner.dto.Dtos.NoticeDto;
 import com.laioffer.travelplanner.entity.Poi;
 import com.laioffer.travelplanner.entity.TravelMode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import io.micrometer.core.annotation.Timed;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.LongSupplier;
 
 /**
  * Orders the POIs of a single day and turns that order into a clock timeline.
@@ -20,31 +23,64 @@ import java.util.Map;
  * travel time is not enough: it happily sends you to a bar that opens at 18:00 first thing in the
  * morning, and to a museum after it has closed. So the objective is lexicographic —
  * first minimize minutes spent inside a closed venue, then minimize the time the day ends, which
- * counts travel and waiting together.
+ * counts travel and waiting together. If both are tied, prefer less total travel time before using
+ * the original-index path as a deterministic final tie-break.
  *
  * <p>For at most 12 movable stops we solve the soft-time-window objective exactly with a multi-label
- * Held-Karp search. Each (visited movable set, last stop) state keeps the non-dominated
- * (closed minutes, departure clock) labels; keeping only one label is not exact because a slightly
- * worse partial violation can leave enough time to avoid a much larger violation later. Locked stops
- * remain in the full route and are forced into their original slots. Larger days use a deterministic
- * earliest-completion seed followed by 2-opt, with the user's current order retained as a no-worse
- * baseline.
+ * Held-Karp search. Each (visited movable set, last stop) state keeps a tie-aware set of retained
+ * labels; keeping only one label is not exact because a slightly worse partial violation can leave
+ * enough time to avoid a much larger violation later. Locked stops remain in the full route and are
+ * forced into their original slots. Larger days use a deterministic earliest-completion seed followed
+ * by 2-opt, with the user's current order retained as a no-worse baseline.
  */
 @Service
 public class RoutePlanner {
 
-    /** Above this many stops per day, exact DP is replaced by the heuristic. */
+    /** Above this many movable stops per day, exact DP is replaced by the heuristic. */
     static final int EXACT_LIMIT = 12;
 
-    enum Algorithm {
+    public enum Algorithm {
+        FIXED_ORDER,
         HELD_KARP,
         GREEDY_TWO_OPT
     }
 
-    private final RouteProvider routes;
+    public record RouteObjective(int closedMinutes, int finishMinutes, int travelMinutes) {
+    }
 
+    public record OptimizationMetrics(int movableStops, long algorithmNanos,
+                                      long generatedLabels, long acceptedLabels, long prunedLabels,
+                                      int maxFrontierSize, long peakFrontierLabelsInLayer) {
+    }
+
+    public record OptimizationResult(List<Integer> order, Algorithm algorithm, boolean optimal,
+                                     RouteObjective before, RouteObjective after,
+                                     OptimizationMetrics metrics) {
+        public OptimizationResult {
+            order = List.copyOf(order);
+        }
+
+        public boolean changed() {
+            for (int position = 0; position < order.size(); position++) {
+                if (order.get(position) != position) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private final RouteProvider routes;
+    private final LongSupplier nanoTime;
+
+    @Autowired
     public RoutePlanner(RouteProvider routes) {
+        this(routes, System::nanoTime);
+    }
+
+    RoutePlanner(RouteProvider routes, LongSupplier nanoTime) {
         this.routes = routes;
+        this.nanoTime = nanoTime;
     }
 
     // ------------------------------------------------------------------ ordering
@@ -68,12 +104,18 @@ public class RoutePlanner {
             description = "Planner computation duration", histogram = true)
     public List<Integer> optimizeOrder(List<Poi> pois, TravelMode mode, int dayStartHour,
                                        List<Boolean> lockedPositions) {
+        return optimizeDetailed(pois, mode, dayStartHour, lockedPositions).order();
+    }
+
+    /**
+     * Runs the optimizer and returns the evidence needed by Week 4 integration and benchmarks.
+     * Provider/matrix time is deliberately excluded from {@code algorithmNanos}.
+     */
+    public OptimizationResult optimizeDetailed(List<Poi> pois, TravelMode mode, int dayStartHour,
+                                               List<Boolean> lockedPositions) {
         int n = pois.size();
         if (lockedPositions.size() != n) {
             throw new IllegalArgumentException("lockedPositions must contain one flag per POI");
-        }
-        if (n <= 1) {
-            return identity(n);
         }
 
         boolean[] locked = new boolean[n];
@@ -84,27 +126,43 @@ public class RoutePlanner {
                 movableCount++;
             }
         }
-        if (movableCount <= 1) {
-            return identity(n);
-        }
 
-        int[][] cost = routes.matrix(pois, mode);
-        validateMatrix(cost, n);
+        int[][] cost = n <= 1 ? new int[n][n] : routes.matrix(pois, mode);
+        if (n > 1) {
+            validateMatrix(cost, n);
+        }
         int dayStart = Math.multiplyExact(dayStartHour, 60);
-        int[] order;
-        if (algorithmFor(movableCount) == Algorithm.HELD_KARP) {
-            order = heldKarp(pois, cost, dayStart, locked, movableCount);
+        int[] original = identityArray(n);
+
+        long started = nanoTime.getAsLong();
+        RouteObjective before = score(original, pois, cost, dayStart);
+        Algorithm algorithm;
+        boolean optimal;
+        SearchOutcome outcome;
+        if (movableCount <= 1) {
+            algorithm = Algorithm.FIXED_ORDER;
+            optimal = true;
+            outcome = SearchOutcome.withoutLabels(original);
+        } else if (algorithmFor(movableCount) == Algorithm.HELD_KARP) {
+            algorithm = Algorithm.HELD_KARP;
+            optimal = true;
+            outcome = heldKarp(pois, cost, dayStart, locked, movableCount);
         } else {
-            int[] original = identityArray(n);
+            algorithm = Algorithm.GREEDY_TWO_OPT;
+            optimal = false;
             int[] greedy = greedyEarliestFinish(pois, cost, dayStart, locked);
             int[] seed = compareOrders(greedy, original, pois, cost, dayStart) < 0 ? greedy : original;
-            order = twoOpt(seed, pois, cost, dayStart, locked);
+            outcome = SearchOutcome.withoutLabels(twoOpt(seed, pois, cost, dayStart, locked));
         }
-        List<Integer> result = new ArrayList<>(n);
-        for (int i : order) {
-            result.add(i);
-        }
-        return result;
+        RouteObjective after = score(outcome.order(), pois, cost, dayStart);
+        long elapsed = Math.max(0L, nanoTime.getAsLong() - started);
+
+        OptimizationMetrics metrics = new OptimizationMetrics(
+                movableCount, elapsed,
+                outcome.generatedLabels(), outcome.acceptedLabels(), outcome.prunedLabels(),
+                outcome.maxFrontierSize(), outcome.peakFrontierLabelsInLayer());
+        return new OptimizationResult(Arrays.stream(outcome.order()).boxed().toList(),
+                algorithm, optimal, before, after, metrics);
     }
 
     static Algorithm algorithmFor(int movableStops) {
@@ -116,13 +174,27 @@ public class RoutePlanner {
     private record Visit(int leaveMinutes, int closedMinutes) {
     }
 
-    private record Objective(int closedMinutes, int endMinutes) {
-    }
-
     private record StateKey(int mask, int last) {
     }
 
-    private record Label(int mask, int last, int clock, int closedMinutes, int[] path) {
+    private record Label(int mask, int last, int clock, int closedMinutes, int travelMinutes,
+                         Label parent, BigInteger tieCode) {
+    }
+
+    private record SearchOutcome(int[] order,
+                                 long generatedLabels, long acceptedLabels, long prunedLabels,
+                                 int maxFrontierSize, long peakFrontierLabelsInLayer) {
+        private static SearchOutcome withoutLabels(int[] order) {
+            return new SearchOutcome(order, 0, 0, 0, 0, 0);
+        }
+    }
+
+    private static final class LabelMetricsAccumulator {
+        private long generated;
+        private long accepted;
+        private long pruned;
+        private int maxFrontierSize = 1;
+        private long peakFrontierLabelsInLayer = 1;
     }
 
     private static int openMinutes(Poi poi) {
@@ -146,11 +218,13 @@ public class RoutePlanner {
      *
      * <p>The bitmask contains movable POIs only. Full route positions are still processed in order, so
      * locked POIs contribute travel, visit duration and opening-hour effects while being forced into
-     * their original slots. A state keeps every non-dominated (closed minutes, clock) label.
+     * their original slots. A state keeps the labels needed to preserve the documented objective,
+     * including travel-time and deterministic ties that can become decisive after an opening wait.
      */
-    private int[] heldKarp(List<Poi> pois, int[][] cost, int dayStart,
-                           boolean[] locked, int movableCount) {
+    private SearchOutcome heldKarp(List<Poi> pois, int[][] cost, int dayStart,
+                                   boolean[] locked, int movableCount) {
         int n = pois.size();
+        int tieBits = Math.max(1, Integer.SIZE - Integer.numberOfLeadingZeros(Math.max(1, n - 1)));
         int[] movableBit = new int[n];
         Arrays.fill(movableBit, -1);
         int bit = 0;
@@ -160,16 +234,18 @@ public class RoutePlanner {
             }
         }
 
-        Map<StateKey, List<Label>> states = new HashMap<>();
-        Label initial = new Label(0, -1, dayStart, 0, new int[0]);
+        LabelMetricsAccumulator metrics = new LabelMetricsAccumulator();
+        Map<StateKey, List<Label>> states = new LinkedHashMap<>();
+        Label initial = new Label(0, -1, dayStart, 0, 0, null, BigInteger.ZERO);
         states.put(new StateKey(0, -1), new ArrayList<>(List.of(initial)));
 
         for (int position = 0; position < n; position++) {
-            Map<StateKey, List<Label>> nextStates = new HashMap<>();
+            Map<StateKey, List<Label>> nextStates = new LinkedHashMap<>();
             for (List<Label> labels : states.values()) {
                 for (Label label : labels) {
                     if (locked[position]) {
-                        addTransition(nextStates, label, position, label.mask(), pois, cost);
+                        addTransition(nextStates, label, position, label.mask(), pois, cost,
+                                tieBits, metrics);
                         continue;
                     }
                     for (int candidate = 0; candidate < n; candidate++) {
@@ -178,10 +254,12 @@ public class RoutePlanner {
                             continue;
                         }
                         addTransition(nextStates, label, candidate,
-                                label.mask() | (1 << candidateBit), pois, cost);
+                                label.mask() | (1 << candidateBit), pois, cost, tieBits, metrics);
                     }
                 }
             }
+            long retained = nextStates.values().stream().mapToLong(List::size).sum();
+            metrics.peakFrontierLabelsInLayer = Math.max(metrics.peakFrontierLabelsInLayer, retained);
             states = nextStates;
         }
 
@@ -200,53 +278,94 @@ public class RoutePlanner {
         if (best == null) {
             throw new IllegalStateException("Exact route search produced no complete order");
         }
-        return best.path();
+        return new SearchOutcome(reconstruct(best, n),
+                metrics.generated, metrics.accepted, metrics.pruned,
+                metrics.maxFrontierSize, metrics.peakFrontierLabelsInLayer);
     }
 
     private void addTransition(Map<StateKey, List<Label>> states, Label previous, int next,
-                               int nextMask, List<Poi> pois, int[][] cost) {
+                               int nextMask, List<Poi> pois, int[][] cost, int tieBits,
+                               LabelMetricsAccumulator metrics) {
         int arrive = previous.clock();
         if (previous.last() >= 0) {
             arrive = Math.addExact(arrive, cost[previous.last()][next]);
         }
         Visit visit = visit(pois.get(next), arrive);
+        metrics.generated++;
+        int travel = previous.last() < 0
+                ? previous.travelMinutes()
+                : Math.addExact(previous.travelMinutes(), cost[previous.last()][next]);
         Label candidate = new Label(nextMask, next, visit.leaveMinutes(),
-                previous.closedMinutes() + visit.closedMinutes(), append(previous.path(), next));
-        addPareto(states, candidate);
+                Math.addExact(previous.closedMinutes(), visit.closedMinutes()), travel, previous,
+                previous.tieCode().shiftLeft(tieBits).or(BigInteger.valueOf(next)));
+        if (addPareto(states, candidate, metrics)) {
+            metrics.accepted++;
+        } else {
+            metrics.pruned++;
+        }
     }
 
-    private void addPareto(Map<StateKey, List<Label>> states, Label candidate) {
+    private boolean addPareto(Map<StateKey, List<Label>> states, Label candidate,
+                              LabelMetricsAccumulator metrics) {
         StateKey key = new StateKey(candidate.mask(), candidate.last());
         List<Label> labels = states.computeIfAbsent(key, ignored -> new ArrayList<>());
         for (Iterator<Label> iterator = labels.iterator(); iterator.hasNext(); ) {
             Label existing = iterator.next();
             if (sameObjective(existing, candidate)) {
-                if (comparePaths(existing.path(), candidate.path()) <= 0) {
-                    return;
+                if (existing.tieCode().compareTo(candidate.tieCode()) <= 0) {
+                    return false;
                 }
                 iterator.remove();
             } else if (dominates(existing, candidate)) {
-                return;
+                return false;
             } else if (dominates(candidate, existing)) {
                 iterator.remove();
             }
         }
         labels.add(candidate);
+        metrics.maxFrontierSize = Math.max(metrics.maxFrontierSize, labels.size());
+        return true;
     }
 
     private static boolean sameObjective(Label a, Label b) {
-        return a.closedMinutes() == b.closedMinutes() && a.clock() == b.clock();
+        return a.closedMinutes() == b.closedMinutes()
+                && a.clock() == b.clock()
+                && a.travelMinutes() == b.travelMinutes();
     }
 
     private static boolean dominates(Label a, Label b) {
-        return a.closedMinutes() <= b.closedMinutes() && a.clock() <= b.clock();
+        if (a.closedMinutes() > b.closedMinutes() || a.clock() > b.clock()) {
+            return false;
+        }
+        if (a.closedMinutes() < b.closedMinutes()) {
+            return true;
+        }
+        // With equal primary score, an earlier prefix can later synchronize on an opening-time wait.
+        // It may discard a later prefix only when it is also no worse on the remaining tie-breakers.
+        if (a.travelMinutes() > b.travelMinutes()) {
+            return false;
+        }
+        if (a.travelMinutes() < b.travelMinutes()) {
+            return true;
+        }
+        return a.tieCode().compareTo(b.tieCode()) <= 0;
     }
 
     private static int compareLabels(Label a, Label b) {
         int objective = compareObjectives(
-                new Objective(a.closedMinutes(), a.clock()),
-                new Objective(b.closedMinutes(), b.clock()));
-        return objective != 0 ? objective : comparePaths(a.path(), b.path());
+                new RouteObjective(a.closedMinutes(), a.clock(), a.travelMinutes()),
+                new RouteObjective(b.closedMinutes(), b.clock(), b.travelMinutes()));
+        return objective != 0 ? objective : a.tieCode().compareTo(b.tieCode());
+    }
+
+    private static int[] reconstruct(Label best, int size) {
+        int[] order = new int[size];
+        Label cursor = best;
+        for (int position = size - 1; position >= 0; position--) {
+            order[position] = cursor.last();
+            cursor = cursor.parent();
+        }
+        return order;
     }
 
     /** Greedy construction: at every step take the stop we can be finished with soonest. */
@@ -270,19 +389,24 @@ public class RoutePlanner {
             int bestNext = -1;
             int bestLeave = Integer.MAX_VALUE;
             int bestClosed = Integer.MAX_VALUE;
+            int bestTravel = Integer.MAX_VALUE;
             for (int j = 0; j < n; j++) {
                 if (locked[j] || used[j]) {
                     continue;
                 }
                 int arrive = previous < 0 ? clock : Math.addExact(clock, cost[previous][j]);
                 Visit visit = visit(pois.get(j), arrive);
+                int travel = previous < 0 ? 0 : cost[previous][j];
                 if (bestNext < 0
-                        || compareObjectives(new Objective(visit.closedMinutes(), visit.leaveMinutes()),
-                        new Objective(bestClosed, bestLeave)) < 0
-                        || (visit.closedMinutes() == bestClosed && visit.leaveMinutes() == bestLeave && j < bestNext)) {
+                        || compareObjectives(new RouteObjective(
+                                visit.closedMinutes(), visit.leaveMinutes(), travel),
+                        new RouteObjective(bestClosed, bestLeave, bestTravel)) < 0
+                        || (visit.closedMinutes() == bestClosed && visit.leaveMinutes() == bestLeave
+                        && travel == bestTravel && j < bestNext)) {
                     bestNext = j;
                     bestLeave = visit.leaveMinutes();
                     bestClosed = visit.closedMinutes();
+                    bestTravel = travel;
                 }
             }
             order[pos] = bestNext;
@@ -305,7 +429,7 @@ public class RoutePlanner {
         }
 
         int[] bestOrder = seed.clone();
-        Objective best = score(bestOrder, pois, cost, dayStart);
+        RouteObjective best = score(bestOrder, pois, cost, dayStart);
         boolean improved = true;
         int guard = 0;
         while (improved && guard++ < 100) {
@@ -314,7 +438,7 @@ public class RoutePlanner {
                 for (int j = i + 1; j < movableOrder.length; j++) {
                     reverse(movableOrder, i, j);
                     int[] candidateOrder = mergeLocked(movableOrder, locked);
-                    Objective candidate = score(candidateOrder, pois, cost, dayStart);
+                    RouteObjective candidate = score(candidateOrder, pois, cost, dayStart);
                     int comparison = compareObjectives(candidate, best);
                     if (comparison < 0 || (comparison == 0 && comparePaths(candidateOrder, bestOrder) < 0)) {
                         best = candidate;
@@ -329,18 +453,21 @@ public class RoutePlanner {
         return bestOrder;
     }
 
-    private Objective score(int[] order, List<Poi> pois, int[][] cost, int dayStart) {
+    private RouteObjective score(int[] order, List<Poi> pois, int[][] cost, int dayStart) {
         int clock = dayStart;
         int closed = 0;
+        int travel = 0;
         for (int pos = 0; pos < order.length; pos++) {
             if (pos > 0) {
-                clock = Math.addExact(clock, cost[order[pos - 1]][order[pos]]);
+                int leg = cost[order[pos - 1]][order[pos]];
+                clock = Math.addExact(clock, leg);
+                travel = Math.addExact(travel, leg);
             }
             Visit visit = visit(pois.get(order[pos]), clock);
             clock = visit.leaveMinutes();
             closed += visit.closedMinutes();
         }
-        return new Objective(closed, clock);
+        return new RouteObjective(closed, clock, travel);
     }
 
     private int compareOrders(int[] a, int[] b, List<Poi> pois, int[][] cost, int dayStart) {
@@ -348,9 +475,13 @@ public class RoutePlanner {
         return objective != 0 ? objective : comparePaths(a, b);
     }
 
-    private static int compareObjectives(Objective a, Objective b) {
+    private static int compareObjectives(RouteObjective a, RouteObjective b) {
         int closed = Integer.compare(a.closedMinutes(), b.closedMinutes());
-        return closed != 0 ? closed : Integer.compare(a.endMinutes(), b.endMinutes());
+        if (closed != 0) {
+            return closed;
+        }
+        int finish = Integer.compare(a.finishMinutes(), b.finishMinutes());
+        return finish != 0 ? finish : Integer.compare(a.travelMinutes(), b.travelMinutes());
     }
 
     private static int comparePaths(int[] a, int[] b) {
@@ -361,12 +492,6 @@ public class RoutePlanner {
             }
         }
         return Integer.compare(a.length, b.length);
-    }
-
-    private static int[] append(int[] path, int value) {
-        int[] result = Arrays.copyOf(path, path.length + 1);
-        result[path.length] = value;
-        return result;
     }
 
     private static void validateMatrix(int[][] cost, int size) {
@@ -406,14 +531,6 @@ public class RoutePlanner {
             order[i++] = order[j];
             order[j--] = tmp;
         }
-    }
-
-    private List<Integer> identity(int n) {
-        List<Integer> list = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            list.add(i);
-        }
-        return list;
     }
 
     private int[] identityArray(int n) {

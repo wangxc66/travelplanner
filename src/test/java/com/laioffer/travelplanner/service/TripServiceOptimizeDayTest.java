@@ -26,16 +26,17 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -101,28 +102,36 @@ class TripServiceOptimizeDayTest {
         stubItems(original);
 
         // Keep Hotel in slot zero, but deliberately move Far, the first movable item, to the end.
-        when(routePlanner.optimizeOrder(anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
-                .thenReturn(List.of(0, 2, 3, 1));
+        when(routePlanner.optimizeDetailed(
+                anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
+                .thenReturn(optimization(List.of(0, 2, 3, 1), 3));
 
         service.optimizeDay(user, TRIP_ID, DAY_INDEX, null);
 
         ArgumentCaptor<List<Poi>> poisCaptor = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<List<Boolean>> locksCaptor = ArgumentCaptor.forClass(List.class);
-        verify(routePlanner).optimizeOrder(poisCaptor.capture(), eq(TravelMode.DRIVE),
+        verify(routePlanner).optimizeDetailed(poisCaptor.capture(), eq(TravelMode.DRIVE),
                 eq(DAY_START_HOUR), locksCaptor.capture());
 
         assertEquals(original.stream().map(ItineraryItem::getPoi).toList(), poisCaptor.getValue(),
                 "locked POIs must remain in the full optimization input");
         assertEquals(List.of(true, false, false, false), locksCaptor.getValue(),
                 "only the actual hotel slot is locked");
-        verify(routePlanner, never()).optimizeOrder(anyList(), any(TravelMode.class), anyInt(), anyBoolean());
+        verify(routePlanner, never()).optimizeOrder(
+                anyList(), any(TravelMode.class), anyInt(), anyBoolean());
 
         List<ItineraryItem> saved = captureSavedItems();
-        assertEquals(List.of("Hotel", "Near", "Mid", "Far"), names(saved));
-        assertSame(hotel, saved.get(0));
+        assertEquals(List.of("Hotel", "Near", "Mid", "Far"), names(saved),
+                "safe two-phase resequencing must persist the complete final order");
+        assertEquals(List.of("Hotel", "Near", "Mid", "Far"), sortedNames(original));
+        assertSame(hotel, original.stream()
+                .min(Comparator.comparingInt(ItineraryItem::getSeq))
+                .orElseThrow());
         assertEquals(3, far.getSeq(), "the first movable item must be allowed to move");
-        assertFalse(saved.get(1).isLocked(), "the first movable slot must not gain an implicit lock");
-        assertSequentialSeq(saved);
+        assertFalse(near.isLocked(), "the first movable slot must not gain an implicit lock");
+        assertSequentialSeq(original.stream()
+                .sorted(Comparator.comparingInt(ItineraryItem::getSeq))
+                .toList());
     }
 
     @Test
@@ -137,36 +146,145 @@ class TripServiceOptimizeDayTest {
         List<ItineraryItem> original = List.of(a, lockedOne, b, c, lockedTwo, d);
         stubItems(original);
 
-        when(routePlanner.optimizeOrder(anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
-                .thenReturn(List.of(5, 1, 3, 2, 4, 0));
+        when(routePlanner.optimizeDetailed(
+                anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
+                .thenReturn(optimization(List.of(5, 1, 3, 2, 4, 0), 4));
 
         service.optimizeDay(user, TRIP_ID, DAY_INDEX, null);
 
         ArgumentCaptor<List<Poi>> poisCaptor = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<List<Boolean>> locksCaptor = ArgumentCaptor.forClass(List.class);
-        verify(routePlanner).optimizeOrder(poisCaptor.capture(), eq(TravelMode.DRIVE),
+        verify(routePlanner).optimizeDetailed(poisCaptor.capture(), eq(TravelMode.DRIVE),
                 eq(DAY_START_HOUR), locksCaptor.capture());
         assertEquals(original.stream().map(ItineraryItem::getPoi).toList(), poisCaptor.getValue());
         assertEquals(List.of(false, true, false, false, true, false), locksCaptor.getValue());
 
         List<ItineraryItem> saved = captureSavedItems();
-        assertEquals(List.of("D", "Locked-1", "C", "B", "Locked-2", "A"), names(saved));
-        assertSame(lockedOne, saved.get(1));
-        assertSame(lockedTwo, saved.get(4));
+        assertEquals(List.of("D", "Locked-1", "C", "B", "Locked-2", "A"), names(saved),
+                "safe two-phase resequencing must persist the complete final order");
+        assertEquals(List.of("D", "Locked-1", "C", "B", "Locked-2", "A"), sortedNames(original));
         assertTrue(lockedOne.isLocked());
         assertTrue(lockedTwo.isLocked());
         assertEquals(1, lockedOne.getSeq());
         assertEquals(4, lockedTwo.getSeq());
-        assertSequentialSeq(saved);
+        assertSequentialSeq(original.stream()
+                .sorted(Comparator.comparingInt(ItineraryItem::getSeq))
+                .toList());
+    }
+
+    @Test
+    void doesNotPersistAnIdentityOptimization() {
+        List<ItineraryItem> original = List.of(
+                item("A", 0, false),
+                item("B", 1, false),
+                item("C", 2, false));
+        stubItems(original);
+        when(routePlanner.optimizeDetailed(
+                anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
+                .thenReturn(optimization(List.of(0, 1, 2), 3));
+
+        var response = service.optimizeDay(user, TRIP_ID, DAY_INDEX, null);
+
+        verify(itemRepository, never()).saveAll(any());
+        assertEquals(List.of(0, 1, 2),
+                original.stream().map(ItineraryItem::getSeq).toList());
+        assertEquals(1, response.optimizationResults().size());
+        assertFalse(response.optimizationResults().getFirst().changed());
+    }
+
+    @Test
+    void repeatedOptimizationPersistsOnlyTheFirstChange() {
+        List<ItineraryItem> original = List.of(
+                item("A", 0, false),
+                item("B", 1, false),
+                item("C", 2, false));
+        stubItems(original);
+        when(routePlanner.optimizeDetailed(
+                anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
+                .thenReturn(
+                        optimization(List.of(1, 0, 2), 3),
+                        optimization(List.of(0, 1, 2), 3));
+
+        service.optimizeDay(user, TRIP_ID, DAY_INDEX, null);
+        service.optimizeDay(user, TRIP_ID, DAY_INDEX, null);
+
+        verify(routePlanner, times(2)).optimizeDetailed(
+                anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList());
+        verify(itemRepository, times(2)).saveAll(any());
+        assertEquals(List.of("B", "A", "C"), sortedNames(original));
+    }
+
+    @Test
+    void usesModeOverrideForBothOptimizationAndReturnedTimeline() {
+        List<ItineraryItem> original = List.of(
+                item("A", 0, false),
+                item("B", 1, false));
+        stubItems(original);
+        when(routePlanner.optimizeDetailed(
+                anyList(), eq(TravelMode.TRANSIT), eq(DAY_START_HOUR), anyList()))
+                .thenReturn(optimization(List.of(0, 1), 2));
+
+        var response = service.optimizeDay(user, TRIP_ID, DAY_INDEX, "transit");
+
+        verify(routePlanner).optimizeDetailed(
+                anyList(), eq(TravelMode.TRANSIT), eq(DAY_START_HOUR), anyList());
+        verify(routePlanner).buildDay(
+                anyList(), eq(TravelMode.TRANSIT), eq(DAY_START_HOUR), eq(DAY_END_HOUR));
+        assertEquals(TravelMode.DRIVE, trip.getDefaultMode(),
+                "a one-request override must not mutate the trip default");
+        assertEquals(1, response.optimizationResults().size());
+        assertEquals("TRANSIT", response.optimizationResults().getFirst().mode());
+        assertNotNull(response.optimizationResults().getFirst().metrics());
+    }
+
+    @Test
+    void optimizeAllBuildsTheTripOnceAndReturnsOneSummaryPerDay() {
+        trip.setNumDays(2);
+        List<ItineraryItem> dayOne = List.of(
+                item("A", 1, 0, false),
+                item("B", 1, 1, false));
+        List<ItineraryItem> dayTwo = List.of(
+                item("C", 2, 0, false),
+                item("D", 2, 1, false));
+        when(itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(TRIP_ID, 1))
+                .thenReturn(dayOne);
+        when(itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(TRIP_ID, 2))
+                .thenReturn(dayTwo);
+        when(itemRepository.findByTripIdOrderByDayIndexAscSeqAsc(TRIP_ID))
+                .thenReturn(java.util.stream.Stream.concat(dayOne.stream(), dayTwo.stream()).toList());
+        when(routePlanner.optimizeDetailed(
+                anyList(), eq(TravelMode.TRANSIT), eq(DAY_START_HOUR), anyList()))
+                .thenAnswer(invocation -> {
+                    int size = invocation.<List<Poi>>getArgument(0).size();
+                    return optimization(
+                            java.util.stream.IntStream.range(0, size).boxed().toList(),
+                            size);
+                });
+
+        var response = service.optimizeAllDays(user, TRIP_ID, "transit");
+
+        verify(routePlanner, times(2)).optimizeDetailed(
+                anyList(), eq(TravelMode.TRANSIT), eq(DAY_START_HOUR), anyList());
+        verify(routePlanner, times(2)).buildDay(
+                anyList(), eq(TravelMode.TRANSIT), eq(DAY_START_HOUR), eq(DAY_END_HOUR));
+        verify(itemRepository, never()).saveAll(any());
+        assertEquals(List.of(1, 2), response.optimizationResults().stream()
+                .map(com.laioffer.travelplanner.dto.Dtos.OptimizationSummaryDto::dayIndex)
+                .toList());
+        assertTrue(response.optimizationResults().stream()
+                .allMatch(result -> result.mode().equals("TRANSIT")));
     }
 
     @Test
     void rejectsAnInvalidOptimizerPermutationBeforeAnyWrite() {
         List<ItineraryItem> original = List.of(
-                item("A", 0, false), item("B", 1, false), item("C", 2, false));
+                item("A", 0, false),
+                item("B", 1, false),
+                item("C", 2, false));
         stubItems(original);
-        when(routePlanner.optimizeOrder(anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
-                .thenReturn(List.of(0, 0, 2));
+        when(routePlanner.optimizeDetailed(
+                anyList(), eq(TravelMode.DRIVE), eq(DAY_START_HOUR), anyList()))
+                .thenReturn(optimization(List.of(0, 0, 2), 3));
 
         assertThrows(IllegalStateException.class,
                 () -> service.optimizeDay(user, TRIP_ID, DAY_INDEX, null));
@@ -176,16 +294,22 @@ class TripServiceOptimizeDayTest {
     }
 
     private ItineraryItem item(String name, int seq, boolean locked) {
+        return item(name, DAY_INDEX, seq, locked);
+    }
+
+    private ItineraryItem item(String name, int dayIndex, int seq, boolean locked) {
         Poi poi = new Poi(city, name, "Landmark", 0, 0, 4.5,
                 30, 0, 24, name);
-        ItineraryItem item = new ItineraryItem(trip, poi, DAY_INDEX, seq);
+        ItineraryItem item = new ItineraryItem(trip, poi, dayIndex, seq);
         item.setLocked(locked);
         return item;
     }
 
     private void stubItems(List<ItineraryItem> items) {
         when(itemRepository.findByTripIdAndDayIndexOrderBySeqAsc(TRIP_ID, DAY_INDEX))
-                .thenReturn(items);
+                .thenAnswer(ignored -> items.stream()
+                        .sorted(Comparator.comparingInt(ItineraryItem::getSeq))
+                        .toList());
         lenient().when(itemRepository.findByTripIdOrderByDayIndexAscSeqAsc(TRIP_ID))
                 .thenAnswer(ignored -> items.stream()
                         .sorted(Comparator.comparingInt(ItineraryItem::getSeq))
@@ -194,7 +318,8 @@ class TripServiceOptimizeDayTest {
 
     @SuppressWarnings("unchecked")
     private List<ItineraryItem> captureSavedItems() {
-        ArgumentCaptor<Iterable<ItineraryItem>> captor = ArgumentCaptor.forClass(Iterable.class);
+        ArgumentCaptor<Iterable<ItineraryItem>> captor =
+                ArgumentCaptor.forClass(Iterable.class);
         verify(itemRepository, times(2)).saveAll(captor.capture());
         List<ItineraryItem> saved = new ArrayList<>();
         captor.getAllValues().getLast().forEach(saved::add);
@@ -202,24 +327,75 @@ class TripServiceOptimizeDayTest {
     }
 
     private static List<String> names(List<ItineraryItem> items) {
-        return items.stream().map(item -> item.getPoi().getName()).toList();
+        return items.stream()
+                .map(item -> item.getPoi().getName())
+                .toList();
+    }
+
+    private static List<String> sortedNames(List<ItineraryItem> items) {
+        return items.stream()
+                .sorted(Comparator.comparingInt(ItineraryItem::getSeq))
+                .map(item -> item.getPoi().getName())
+                .toList();
+    }
+
+    private static RoutePlanner.OptimizationResult optimization(
+            List<Integer> order,
+            int movableStops) {
+        RoutePlanner.RouteObjective before =
+                new RoutePlanner.RouteObjective(30, 900, 120);
+        RoutePlanner.RouteObjective after =
+                new RoutePlanner.RouteObjective(
+                        order.equals(java.util.stream.IntStream.range(0, order.size())
+                                .boxed().toList()) ? 30 : 0,
+                        order.equals(java.util.stream.IntStream.range(0, order.size())
+                                .boxed().toList()) ? 900 : 840,
+                        order.equals(java.util.stream.IntStream.range(0, order.size())
+                                .boxed().toList()) ? 120 : 90);
+        return new RoutePlanner.OptimizationResult(
+                order,
+                RoutePlanner.Algorithm.HELD_KARP,
+                true,
+                before,
+                after,
+                new RoutePlanner.OptimizationMetrics(
+                        movableStops,
+                        1_000_000L,
+                        10,
+                        8,
+                        2,
+                        2,
+                        4));
     }
 
     private static void assertSequentialSeq(List<ItineraryItem> items) {
         for (int i = 0; i < items.size(); i++) {
-            assertEquals(i, items.get(i).getSeq(), "seq mismatch at saved position " + i);
+            assertEquals(i, items.get(i).getSeq(),
+                    "seq mismatch at saved position " + i);
         }
     }
 
-    private static RoutePlanner.DayPlan emptyDayPlan(int stopCount, int dayStartHour) {
+    private static RoutePlanner.DayPlan emptyDayPlan(
+            int stopCount,
+            int dayStartHour) {
         int start = dayStartHour * 60;
         List<RoutePlanner.StopPlan> stops = new ArrayList<>(stopCount);
         for (int i = 0; i < stopCount; i++) {
             int arrive = start + i * 30;
-            stops.add(new RoutePlanner.StopPlan(arrive, arrive + 30,
-                    0, 0, null, List.of()));
+            stops.add(new RoutePlanner.StopPlan(
+                    arrive,
+                    arrive + 30,
+                    0,
+                    0,
+                    null,
+                    List.of()));
         }
-        return new RoutePlanner.DayPlan(stops, stopCount * 30, 0,
-                start, start + stopCount * 30, List.of());
+        return new RoutePlanner.DayPlan(
+                stops,
+                stopCount * 30,
+                0,
+                start,
+                start + stopCount * 30,
+                List.of());
     }
 }
