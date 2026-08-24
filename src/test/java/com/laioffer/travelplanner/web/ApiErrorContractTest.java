@@ -35,7 +35,7 @@ class ApiErrorContractTest {
     void invalidRequestUsesTheSameErrorEnvelope() throws Exception {
         mockMvc.perform(post("/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{}"))
+                        .content("{\"username\":\"\",\"password\":\"ValidPassword123\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.code").value("error.usernameRules"))
