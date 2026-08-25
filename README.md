@@ -130,6 +130,10 @@ that the whole product switches language instantly with no redeploy, and all cop
 
 ## API
 
+The versioned, machine-readable API contract is in [`docs/openapi.yaml`](docs/openapi.yaml).
+It is the source of truth for request/response shapes, authentication, semantic errors, and examples;
+update it in the same pull request as any API change.
+
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/auth/register`, `/auth/login` | returns a JWT |

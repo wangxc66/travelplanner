@@ -2,10 +2,12 @@ package com.laioffer.travelplanner.web;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.Map;
 
@@ -29,6 +31,18 @@ public class GlobalExceptionHandler {
                 "message", message,
                 "code", code,
                 "params", Map.of()));
+    }
+
+    /** Invalid JSON (including an invalid ISO date) must use the same public error envelope. */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, Object>> handleUnreadableBody(HttpMessageNotReadableException e) {
+        return invalidRequest("Malformed JSON request");
+    }
+
+    /** Path and query parameters are part of the public API contract too. */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<Map<String, Object>> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        return invalidRequest("Invalid value for " + e.getName());
     }
 
     private static String validationCode(FieldError field) {
@@ -57,8 +71,15 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleIllegalArgument(IllegalArgumentException e) {
+        String message = e.getMessage() == null || e.getMessage().isBlank()
+                ? "Invalid request"
+                : e.getMessage();
+        return invalidRequest(message);
+    }
+
+    private ResponseEntity<Map<String, Object>> invalidRequest(String message) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of(
-                "message", String.valueOf(e.getMessage()),
+                "message", message,
                 "code", "error.invalidRequest",
                 "params", Map.of()));
     }
