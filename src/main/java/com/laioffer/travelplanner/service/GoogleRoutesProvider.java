@@ -108,7 +108,7 @@ public class GoogleRoutesProvider implements RouteProvider {
         body.put("origins", waypoints);
         body.put("destinations", waypoints);
         body.put("travelMode", mode.name());
-        departureTime(pois).ifPresent(t -> body.put("departureTime", t));
+        applyRoutingTime(body, pois, mode);
 
         List<Map<String, Object>> elements = client.post()
                 .uri(MATRIX_PATH)
@@ -178,7 +178,7 @@ public class GoogleRoutesProvider implements RouteProvider {
         }
         body.put("travelMode", mode.name());
         body.put("polylineEncoding", "ENCODED_POLYLINE");
-        departureTime(ordered).ifPresent(t -> body.put("departureTime", t));
+        applyRoutingTime(body, ordered, mode);
 
         Map<String, Object> response = client.post()
                 .uri(ROUTES_PATH)
@@ -265,6 +265,20 @@ public class GoogleRoutesProvider implements RouteProvider {
         } catch (Exception e) {
             return java.util.Optional.empty();
         }
+    }
+
+    /**
+     * Google rejects a departure timestamp for traffic-unaware driving and for walking. Driving
+     * therefore explicitly requests traffic-aware routing; transit accepts the timestamp directly.
+     */
+    private static void applyRoutingTime(Map<String, Object> body, List<Poi> pois, TravelMode mode) {
+        if (mode == TravelMode.WALK) {
+            return;
+        }
+        if (mode == TravelMode.DRIVE) {
+            body.put("routingPreference", "TRAFFIC_AWARE");
+        }
+        departureTime(pois).ifPresent(t -> body.put("departureTime", t));
     }
 
     private static String cacheKey(String prefix, List<Poi> pois, TravelMode mode) {
