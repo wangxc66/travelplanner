@@ -2,6 +2,11 @@ spring:
   application:
     name: travelplanner
 
+  config:
+    # Spring Boot does not load a project .env file by default. Keep this optional so CI and
+    # deployments can continue to supply real environment variables instead.
+    import: optional:file:.env[.properties]
+
   profiles:
     # Local zero-setup experience. Production activates `postgres`, where demo seed is not enabled.
     default: demo-seed
@@ -68,7 +73,9 @@ travelplanner:
   google:
     # Set this (or GOOGLE_MAPS_API_KEY) to get real routes and durations from the Routes API for
     # every travel mode. When empty, routing falls back to OSRM below.
-    api-key: ${GOOGLE_MAPS_API_KEY:}
+    # GEOCODING_KEY is retained as a local compatibility fallback for the existing .env file.
+    # GOOGLE_MAPS_API_KEY takes precedence in CI and deployed environments.
+    api-key: ${GOOGLE_MAPS_API_KEY:${GEOCODING_KEY:}}
     routes-base-url: https://routes.googleapis.com
   osrm:
     # Keyless real street routing, used when no Google key is set. The public demo server is a
@@ -116,3 +123,9 @@ travelplanner:
   h2:
     tcp:
       enabled: true
+  gcs:
+    bucket: ${GCS_BUCKET}
+  geocoding:
+    key: ${GEOCODING_KEY}
+  jwt:
+    secret-key: ${JWT_SECRET_KEY}
